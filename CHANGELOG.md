@@ -21,7 +21,7 @@ Replacement `tsi1` indexes will be automatically generated on startup for shards
 
 ### Features
 
-1. [20467](https://github.com/influxdata/influxdb/pull/20467): Add `influxd inspect export` command to extract DB data in line-protocol format.
+1. [20467](https://github.com/influxdata/influxdb/pull/20467): Add `influxd inspect export-lp` command to extract data in line-protocol format.
 
 ### Bug Fixes
 
