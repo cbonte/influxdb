@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -15,12 +15,15 @@ import (
 	"github.com/influxdata/httprouter"
 	"github.com/influxdata/influxdb/v2"
 	pcontext "github.com/influxdata/influxdb/v2/context"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"github.com/influxdata/influxdb/v2/mock"
 	"github.com/influxdata/influxdb/v2/notification"
 	"github.com/influxdata/influxdb/v2/notification/check"
 	"github.com/influxdata/influxdb/v2/pkg/testttp"
 	"github.com/influxdata/influxdb/v2/query/fluxlang"
+	"github.com/influxdata/influxdb/v2/task/taskmodel"
 	influxTesting "github.com/influxdata/influxdb/v2/testing"
 	"go.uber.org/zap/zaptest"
 )
@@ -162,6 +165,7 @@ func TestService_handleGetChecks(t *testing.T) {
 			"reportZero": false,
 			"statusMessageTemplate": "",
 			"tags": null,
+			"taskID": "0000000000000003",
 			"type": "deadman",
       "labels": [
         {
@@ -205,6 +209,7 @@ func TestService_handleGetChecks(t *testing.T) {
 			},
 			"statusMessageTemplate": "",
 			"tags": null,
+			"taskID": "0000000000000003",
 			"thresholds": [
 				{
 					"allValues": false,
@@ -281,8 +286,8 @@ func TestService_handleGetChecks(t *testing.T) {
 			checkBackend.CheckService = tt.fields.CheckService
 			checkBackend.LabelService = tt.fields.LabelService
 			checkBackend.TaskService = &mock.TaskService{
-				FindTaskByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Task, error) {
-					return &influxdb.Task{Status: "active"}, nil
+				FindTaskByIDFn: func(ctx context.Context, id platform.ID) (*taskmodel.Task, error) {
+					return &taskmodel.Task{Status: "active"}, nil
 				},
 			}
 			h := NewCheckHandler(zaptest.NewLogger(t), checkBackend)
@@ -304,7 +309,7 @@ func TestService_handleGetChecks(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleGetChecks() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -353,7 +358,7 @@ func TestService_handleGetCheckQuery(t *testing.T) {
 			name: "get a check query by id",
 			fields: fields{
 				&mock.CheckService{
-					FindCheckByIDFn: func(ctx context.Context, id influxdb.ID) (influxdb.Check, error) {
+					FindCheckByIDFn: func(ctx context.Context, id platform.ID) (influxdb.Check, error) {
 						if id == influxTesting.MustIDBase16("020f755c3c082000") {
 							return &check.Threshold{
 								Base: check.Base{
@@ -413,18 +418,42 @@ func TestService_handleGetCheckQuery(t *testing.T) {
 			wants: wants{
 				statusCode:  http.StatusOK,
 				contentType: "application/json; charset=utf-8",
-				body:        "{\"flux\":\"package main\\nimport \\\"influxdata/influxdb/monitor\\\"\\nimport \\\"influxdata/influxdb/v1\\\"\\n\\ndata = from(bucket: \\\"foo\\\")\\n\\t|\\u003e range(start: -1h)\\n\\t|\\u003e filter(fn: (r) =\\u003e\\n\\t\\t(r._field == \\\"usage_idle\\\"))\\n\\t|\\u003e aggregateWindow(every: 1h, fn: mean, createEmpty: false)\\n\\noption task = {name: \\\"hello\\\", every: 1h}\\n\\ncheck = {\\n\\t_check_id: \\\"020f755c3c082000\\\",\\n\\t_check_name: \\\"hello\\\",\\n\\t_type: \\\"threshold\\\",\\n\\ttags: {aaa: \\\"vaaa\\\", bbb: \\\"vbbb\\\"},\\n}\\nok = (r) =\\u003e\\n\\t(r[\\\"usage_idle\\\"] \\u003e 10.0)\\ninfo = (r) =\\u003e\\n\\t(r[\\\"usage_idle\\\"] \\u003c 40.0)\\nwarn = (r) =\\u003e\\n\\t(r[\\\"usage_idle\\\"] \\u003c 40.0 and r[\\\"usage_idle\\\"] \\u003e 10.0)\\ncrit = (r) =\\u003e\\n\\t(r[\\\"usage_idle\\\"] \\u003c 40.0 and r[\\\"usage_idle\\\"] \\u003e 10.0)\\nmessageFn = (r) =\\u003e\\n\\t(\\\"whoa! {check.yeah}\\\")\\n\\ndata\\n\\t|\\u003e v1[\\\"fieldsAsCols\\\"]()\\n\\t|\\u003e monitor[\\\"check\\\"](\\n\\t\\tdata: check,\\n\\t\\tmessageFn: messageFn,\\n\\t\\tok: ok,\\n\\t\\tinfo: info,\\n\\t\\twarn: warn,\\n\\t\\tcrit: crit,\\n\\t)\"}\n",
+				body: "{\"flux\":" + formatFluxJson(t, `import "influxdata/influxdb/monitor"
+import "influxdata/influxdb/v1"
+data =
+    from(bucket: "foo")
+        |> range(start: -1h)
+        |> filter(fn: (r) => r._field == "usage_idle")
+        |> aggregateWindow(every: 1h, fn: mean, createEmpty: false)
+option task = {name: "hello", every: 1h}
+check = {_check_id: "020f755c3c082000", _check_name: "hello", _type: "threshold", tags: {aaa: "vaaa", bbb: "vbbb"}}
+ok = (r) => r["usage_idle"] > 10.0
+info = (r) => r["usage_idle"] < 40.0
+warn = (r) => r["usage_idle"] < 40.0 and r["usage_idle"] > 10.0
+crit = (r) => r["usage_idle"] < 40.0 and r["usage_idle"] > 10.0
+messageFn = (r) => "whoa! {check.yeah}"
+data
+    |> v1["fieldsAsCols"]()
+    |> monitor["check"](
+        data: check,
+        messageFn: messageFn,
+        ok: ok,
+        info: info,
+        warn: warn,
+        crit: crit,
+    )
+`) + "}\n",
 			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			checkBackend := NewMockCheckBackend(t)
-			checkBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			checkBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			checkBackend.CheckService = tt.fields.CheckService
 			checkBackend.TaskService = &mock.TaskService{
-				FindTaskByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Task, error) {
-					return &influxdb.Task{}, nil
+				FindTaskByIDFn: func(ctx context.Context, id platform.ID) (*taskmodel.Task, error) {
+					return &taskmodel.Task{}, nil
 				},
 			}
 
@@ -440,12 +469,28 @@ func TestService_handleGetCheckQuery(t *testing.T) {
 				}).
 				ExpectBody(func(body *bytes.Buffer) {
 					if eq, diff, err := jsonEqual(body.String(), tt.wants.body); err != nil || tt.wants.body != "" && !eq {
-						fmt.Printf("%q\n", body.String())
+						if err != nil {
+							t.Errorf("jsonEqual error: %v", err)
+						}
 						t.Errorf("%q. handleGetChecks() = ***%v***", tt.name, diff)
 					}
 				})
 		})
 	}
+}
+
+func formatFluxJson(t *testing.T, script string) string {
+	formatted := influxTesting.FormatFluxString(t, script)
+
+	enc, err := json.Marshal(formatted)
+	if err != nil {
+		t.Fatalf("error marshalling flux: %v", err)
+	}
+
+	var bb bytes.Buffer
+	json.HTMLEscape(&bb, enc)
+	std := bb.String()
+	return std
 }
 
 func TestService_handleGetCheck(t *testing.T) {
@@ -471,7 +516,7 @@ func TestService_handleGetCheck(t *testing.T) {
 			name: "get a check by id",
 			fields: fields{
 				&mock.CheckService{
-					FindCheckByIDFn: func(ctx context.Context, id influxdb.ID) (influxdb.Check, error) {
+					FindCheckByIDFn: func(ctx context.Context, id platform.ID) (influxdb.Check, error) {
 						if id == influxTesting.MustIDBase16("020f755c3c082000") {
 							return &check.Deadman{
 								Base: check.Base{
@@ -527,6 +572,7 @@ func TestService_handleGetCheck(t *testing.T) {
           "status": "active",
           "statusMessageTemplate": "",
           "tags": null,
+          "taskID": "0000000000000003",
           "type": "deadman",
 		  "orgID": "020f755c3c082000",
 			"name": "hello",
@@ -541,9 +587,9 @@ func TestService_handleGetCheck(t *testing.T) {
 			name: "not found",
 			fields: fields{
 				&mock.CheckService{
-					FindCheckByIDFn: func(ctx context.Context, id influxdb.ID) (influxdb.Check, error) {
-						return nil, &influxdb.Error{
-							Code: influxdb.ENotFound,
+					FindCheckByIDFn: func(ctx context.Context, id platform.ID) (influxdb.Check, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "check not found",
 						}
 					},
@@ -561,11 +607,11 @@ func TestService_handleGetCheck(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			checkBackend := NewMockCheckBackend(t)
-			checkBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			checkBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			checkBackend.CheckService = tt.fields.CheckService
 			checkBackend.TaskService = &mock.TaskService{
-				FindTaskByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Task, error) {
-					return &influxdb.Task{Status: "active"}, nil
+				FindTaskByIDFn: func(ctx context.Context, id platform.ID) (*taskmodel.Task, error) {
+					return &taskmodel.Task{Status: "active"}, nil
 				},
 			}
 			h := NewCheckHandler(zaptest.NewLogger(t), checkBackend)
@@ -588,7 +634,7 @@ func TestService_handleGetCheck(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 			t.Logf(res.Header.Get("X-Influx-Error"))
 
 			if res.StatusCode != tt.wants.statusCode {
@@ -614,7 +660,7 @@ func TestService_handlePostCheck(t *testing.T) {
 		OrganizationService influxdb.OrganizationService
 	}
 	type args struct {
-		userID influxdb.ID
+		userID platform.ID
 		check  influxdb.Check
 	}
 	type wants struct {
@@ -633,7 +679,7 @@ func TestService_handlePostCheck(t *testing.T) {
 			name: "create a new check",
 			fields: fields{
 				CheckService: &mock.CheckService{
-					CreateCheckFn: func(ctx context.Context, c influxdb.CheckCreate, userID influxdb.ID) error {
+					CreateCheckFn: func(ctx context.Context, c influxdb.CheckCreate, userID platform.ID) error {
 						c.SetID(influxTesting.MustIDBase16("020f755c3c082000"))
 						c.SetOwnerID(userID)
 						return nil
@@ -704,6 +750,7 @@ func TestService_handlePostCheck(t *testing.T) {
   "name": "",
   "text": ""
 },
+  "taskID": "0000000000000003",
   "type": "deadman",
   "timeSince": "13s",
   "createdAt": "0001-01-01T00:00:00Z",
@@ -731,8 +778,8 @@ func TestService_handlePostCheck(t *testing.T) {
 			checkBackend.CheckService = tt.fields.CheckService
 			checkBackend.OrganizationService = tt.fields.OrganizationService
 			checkBackend.TaskService = &mock.TaskService{
-				FindTaskByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Task, error) {
-					return &influxdb.Task{Status: "active"}, nil
+				FindTaskByIDFn: func(ctx context.Context, id platform.ID) (*taskmodel.Task, error) {
+					return &taskmodel.Task{Status: "active"}, nil
 				},
 			}
 			h := NewCheckHandler(zaptest.NewLogger(t), checkBackend)
@@ -749,7 +796,7 @@ func TestService_handlePostCheck(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePostCheck() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -791,7 +838,7 @@ func TestService_handleDeleteCheck(t *testing.T) {
 			name: "remove a check by id",
 			fields: fields{
 				&mock.CheckService{
-					DeleteCheckFn: func(ctx context.Context, id influxdb.ID) error {
+					DeleteCheckFn: func(ctx context.Context, id platform.ID) error {
 						if id == influxTesting.MustIDBase16("020f755c3c082000") {
 							return nil
 						}
@@ -811,9 +858,9 @@ func TestService_handleDeleteCheck(t *testing.T) {
 			name: "check not found",
 			fields: fields{
 				&mock.CheckService{
-					DeleteCheckFn: func(ctx context.Context, id influxdb.ID) error {
-						return &influxdb.Error{
-							Code: influxdb.ENotFound,
+					DeleteCheckFn: func(ctx context.Context, id platform.ID) error {
+						return &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "check not found",
 						}
 					},
@@ -831,11 +878,11 @@ func TestService_handleDeleteCheck(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			checkBackend := NewMockCheckBackend(t)
-			checkBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			checkBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			checkBackend.CheckService = tt.fields.CheckService
 			checkBackend.TaskService = &mock.TaskService{
-				FindTaskByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Task, error) {
-					return &influxdb.Task{}, nil
+				FindTaskByIDFn: func(ctx context.Context, id platform.ID) (*taskmodel.Task, error) {
+					return &taskmodel.Task{}, nil
 				},
 			}
 			h := NewCheckHandler(zaptest.NewLogger(t), checkBackend)
@@ -858,7 +905,7 @@ func TestService_handleDeleteCheck(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleDeleteCheck() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -901,7 +948,7 @@ func TestService_handlePatchCheck(t *testing.T) {
 			name: "update a check name",
 			fields: fields{
 				&mock.CheckService{
-					PatchCheckFn: func(ctx context.Context, id influxdb.ID, upd influxdb.CheckUpdate) (influxdb.Check, error) {
+					PatchCheckFn: func(ctx context.Context, id platform.ID, upd influxdb.CheckUpdate) (influxdb.Check, error) {
 						if id == influxTesting.MustIDBase16("020f755c3c082000") {
 							d := &check.Deadman{
 								Base: check.Base{
@@ -964,6 +1011,7 @@ func TestService_handlePatchCheck(t *testing.T) {
 			"status": "active",
 			"statusMessageTemplate": "",
 			"tags": null,
+			"taskID": "0000000000000003",
 			"type": "deadman",
 			"labels": [],
 			"latestCompleted": "0001-01-01T00:00:00Z",
@@ -976,9 +1024,9 @@ func TestService_handlePatchCheck(t *testing.T) {
 			name: "check not found",
 			fields: fields{
 				&mock.CheckService{
-					PatchCheckFn: func(ctx context.Context, id influxdb.ID, upd influxdb.CheckUpdate) (influxdb.Check, error) {
-						return nil, &influxdb.Error{
-							Code: influxdb.ENotFound,
+					PatchCheckFn: func(ctx context.Context, id platform.ID, upd influxdb.CheckUpdate) (influxdb.Check, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "check not found",
 						}
 					},
@@ -997,11 +1045,11 @@ func TestService_handlePatchCheck(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			checkBackend := NewMockCheckBackend(t)
-			checkBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			checkBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			checkBackend.CheckService = tt.fields.CheckService
 			checkBackend.TaskService = &mock.TaskService{
-				FindTaskByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Task, error) {
-					return &influxdb.Task{Status: "active"}, nil
+				FindTaskByIDFn: func(ctx context.Context, id platform.ID) (*taskmodel.Task, error) {
+					return &taskmodel.Task{Status: "active"}, nil
 				},
 			}
 			h := NewCheckHandler(zaptest.NewLogger(t), checkBackend)
@@ -1034,7 +1082,7 @@ func TestService_handlePatchCheck(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePatchCheck() = %v, want %v %v", tt.name, res.StatusCode, tt.wants.statusCode, w.Header())
@@ -1077,7 +1125,7 @@ func TestService_handleUpdateCheck(t *testing.T) {
 			name: "update a check name",
 			fields: fields{
 				CheckService: &mock.CheckService{
-					UpdateCheckFn: func(ctx context.Context, id influxdb.ID, chk influxdb.CheckCreate) (influxdb.Check, error) {
+					UpdateCheckFn: func(ctx context.Context, id platform.ID, chk influxdb.CheckCreate) (influxdb.Check, error) {
 						if id == influxTesting.MustIDBase16("020f755c3c082000") {
 							d := &check.Deadman{
 								Base: check.Base{
@@ -1151,6 +1199,7 @@ func TestService_handleUpdateCheck(t *testing.T) {
           "status": "active",
           "statusMessageTemplate": "",
           "tags": null,
+          "taskID": "0000000000000003",
           "type": "deadman",
 					"labels": [],
 					"latestCompleted": "0001-01-01T00:00:00Z",
@@ -1163,9 +1212,9 @@ func TestService_handleUpdateCheck(t *testing.T) {
 			name: "check not found",
 			fields: fields{
 				CheckService: &mock.CheckService{
-					UpdateCheckFn: func(ctx context.Context, id influxdb.ID, chk influxdb.CheckCreate) (influxdb.Check, error) {
-						return nil, &influxdb.Error{
-							Code: influxdb.ENotFound,
+					UpdateCheckFn: func(ctx context.Context, id platform.ID, chk influxdb.CheckCreate) (influxdb.Check, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "check not found",
 						}
 					},
@@ -1191,11 +1240,11 @@ func TestService_handleUpdateCheck(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			checkBackend := NewMockCheckBackend(t)
-			checkBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			checkBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			checkBackend.CheckService = tt.fields.CheckService
 			checkBackend.TaskService = &mock.TaskService{
-				FindTaskByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Task, error) {
-					return &influxdb.Task{Status: "active"}, nil
+				FindTaskByIDFn: func(ctx context.Context, id platform.ID) (*taskmodel.Task, error) {
+					return &taskmodel.Task{Status: "active"}, nil
 				},
 			}
 			h := NewCheckHandler(zaptest.NewLogger(t), checkBackend)
@@ -1223,7 +1272,7 @@ func TestService_handleUpdateCheck(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePutCheck() = %v, want %v %v %v", tt.name, res.StatusCode, tt.wants.statusCode, w.Header(), string(body))
@@ -1266,7 +1315,7 @@ func TestService_handlePostCheckMember(t *testing.T) {
 			name: "add a check member",
 			fields: fields{
 				UserService: &mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{
 							ID:     id,
 							Name:   "name",
@@ -1305,8 +1354,8 @@ func TestService_handlePostCheckMember(t *testing.T) {
 			checkBackend := NewMockCheckBackend(t)
 			checkBackend.UserService = tt.fields.UserService
 			checkBackend.TaskService = &mock.TaskService{
-				FindTaskByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Task, error) {
-					return &influxdb.Task{}, nil
+				FindTaskByIDFn: func(ctx context.Context, id platform.ID) (*taskmodel.Task, error) {
+					return &taskmodel.Task{}, nil
 				},
 			}
 			h := NewCheckHandler(zaptest.NewLogger(t), checkBackend)
@@ -1324,7 +1373,7 @@ func TestService_handlePostCheckMember(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePostCheckMember() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -1365,7 +1414,7 @@ func TestService_handlePostCheckOwner(t *testing.T) {
 			name: "add a check owner",
 			fields: fields{
 				UserService: &mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{
 							ID:     id,
 							Name:   "name",
@@ -1418,7 +1467,7 @@ func TestService_handlePostCheckOwner(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePostCheckOwner() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)

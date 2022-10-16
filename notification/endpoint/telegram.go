@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 )
 
 var _ influxdb.NotificationEndpoint = &Telegram{}
@@ -42,14 +43,14 @@ func (s Telegram) Valid() error {
 		return err
 	}
 	if s.Token.Key == "" {
-		return &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "empty telegram bot token",
 		}
 	}
 	if s.Channel == "" {
-		return &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "empty telegram channel",
 		}
 	}

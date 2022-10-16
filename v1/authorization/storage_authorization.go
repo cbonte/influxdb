@@ -6,8 +6,11 @@ import (
 
 	"github.com/buger/jsonparser"
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/kv"
 	jsonp "github.com/influxdata/influxdb/v2/pkg/jsonparser"
+	"github.com/influxdata/influxdb/v2/tenant"
 )
 
 func authIndexKey(n string) []byte {
@@ -29,8 +32,8 @@ func encodeAuthorization(a *influxdb.Authorization) ([]byte, error) {
 	case "":
 		a.Status = influxdb.Active
 	default:
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "unknown authorization status",
 		}
 	}
@@ -66,14 +69,25 @@ func (s *Store) CreateAuthorization(ctx context.Context, tx kv.Tx, a *influxdb.A
 		a.ID = id
 	}
 
+	ts := tenant.NewStore(s.kvStore)
+	for _, p := range a.Permissions {
+		if p.Resource.ID == nil || p.Resource.Type != influxdb.BucketsResourceType {
+			continue
+		}
+		_, err := ts.GetBucket(ctx, tx, *p.Resource.ID)
+		if err == tenant.ErrBucketNotFound {
+			return ErrBucketNotFound
+		}
+	}
+
 	if err := s.uniqueAuthToken(ctx, tx, a); err != nil {
 		return ErrTokenAlreadyExistsError
 	}
 
 	v, err := encodeAuthorization(a)
 	if err != nil {
-		return &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return &errors.Error{
+			Code: errors.EInvalid,
 			Err:  err,
 		}
 	}
@@ -89,8 +103,8 @@ func (s *Store) CreateAuthorization(ctx context.Context, tx kv.Tx, a *influxdb.A
 	}
 
 	if err := idx.Put(authIndexKey(a.Token), encodedID); err != nil {
-		return &influxdb.Error{
-			Code: influxdb.EInternal,
+		return &errors.Error{
+			Code: errors.EInternal,
 			Err:  err,
 		}
 	}
@@ -101,7 +115,7 @@ func (s *Store) CreateAuthorization(ctx context.Context, tx kv.Tx, a *influxdb.A
 	}
 
 	if err := b.Put(encodedID, v); err != nil {
-		return &influxdb.Error{
+		return &errors.Error{
 			Err: err,
 		}
 	}
@@ -110,7 +124,7 @@ func (s *Store) CreateAuthorization(ctx context.Context, tx kv.Tx, a *influxdb.A
 }
 
 // GetAuthorization gets an authorization by its ID from the auth bucket in kv
-func (s *Store) GetAuthorizationByID(ctx context.Context, tx kv.Tx, id influxdb.ID) (*influxdb.Authorization, error) {
+func (s *Store) GetAuthorizationByID(ctx context.Context, tx kv.Tx, id platform.ID) (*influxdb.Authorization, error) {
 	encodedID, err := id.Encode()
 	if err != nil {
 		return nil, ErrInvalidAuthID
@@ -132,8 +146,8 @@ func (s *Store) GetAuthorizationByID(ctx context.Context, tx kv.Tx, id influxdb.
 
 	a := &influxdb.Authorization{}
 	if err := decodeAuthorization(v, a); err != nil {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Err:  err,
 		}
 	}
@@ -150,16 +164,16 @@ func (s *Store) GetAuthorizationByToken(ctx context.Context, tx kv.Tx, token str
 	// use the token to look up the authorization's ID
 	idKey, err := idx.Get(authIndexKey(token))
 	if kv.IsNotFound(err) {
-		return nil, &influxdb.Error{
-			Code: influxdb.ENotFound,
+		return nil, &errors.Error{
+			Code: errors.ENotFound,
 			Msg:  "authorization not found",
 		}
 	}
 
-	var id influxdb.ID
+	var id platform.ID
 	if err := id.Decode(idKey); err != nil {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Err:  err,
 		}
 	}
@@ -221,19 +235,19 @@ func (s *Store) forEachAuthorization(ctx context.Context, tx kv.Tx, pred kv.Curs
 }
 
 // UpdateAuthorization updates the status and description only of an authorization
-func (s *Store) UpdateAuthorization(ctx context.Context, tx kv.Tx, id influxdb.ID, a *influxdb.Authorization) (*influxdb.Authorization, error) {
+func (s *Store) UpdateAuthorization(ctx context.Context, tx kv.Tx, id platform.ID, a *influxdb.Authorization) (*influxdb.Authorization, error) {
 	v, err := encodeAuthorization(a)
 	if err != nil {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Err:  err,
 		}
 	}
 
 	encodedID, err := a.ID.Encode()
 	if err != nil {
-		return nil, &influxdb.Error{
-			Code: influxdb.ENotFound,
+		return nil, &errors.Error{
+			Code: errors.ENotFound,
 			Err:  err,
 		}
 	}
@@ -244,8 +258,8 @@ func (s *Store) UpdateAuthorization(ctx context.Context, tx kv.Tx, id influxdb.I
 	}
 
 	if err := idx.Put(authIndexKey(a.Token), encodedID); err != nil {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInternal,
+		return nil, &errors.Error{
+			Code: errors.EInternal,
 			Err:  err,
 		}
 	}
@@ -256,7 +270,7 @@ func (s *Store) UpdateAuthorization(ctx context.Context, tx kv.Tx, id influxdb.I
 	}
 
 	if err := b.Put(encodedID, v); err != nil {
-		return nil, &influxdb.Error{
+		return nil, &errors.Error{
 			Err: err,
 		}
 	}
@@ -266,7 +280,7 @@ func (s *Store) UpdateAuthorization(ctx context.Context, tx kv.Tx, id influxdb.I
 }
 
 // DeleteAuthorization removes an authorization from storage
-func (s *Store) DeleteAuthorization(ctx context.Context, tx kv.Tx, id influxdb.ID) error {
+func (s *Store) DeleteAuthorization(ctx context.Context, tx kv.Tx, id platform.ID) error {
 	a, err := s.GetAuthorizationByID(ctx, tx, id)
 	if err != nil {
 		return err
@@ -332,7 +346,7 @@ func unique(ctx context.Context, tx kv.Tx, indexBucket, indexKey []byte) error {
 }
 
 // uniqueID returns nil if the ID provided is unique, returns an error otherwise
-func uniqueID(ctx context.Context, tx kv.Tx, id influxdb.ID) error {
+func uniqueID(ctx context.Context, tx kv.Tx, id platform.ID) error {
 	encodedID, err := id.Encode()
 	if err != nil {
 		return ErrInvalidAuthID

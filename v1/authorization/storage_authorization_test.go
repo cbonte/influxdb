@@ -8,10 +8,13 @@ import (
 
 	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/inmem"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kv"
 	"github.com/influxdata/influxdb/v2/kv/migration/all"
 	"github.com/influxdata/influxdb/v2/pkg/pointer"
+	"github.com/influxdata/influxdb/v2/tenant"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -19,10 +22,10 @@ func TestAuth(t *testing.T) {
 	setup := func(t *testing.T, store *Store, tx kv.Tx) {
 		for i := 1; i <= 10; i++ {
 			err := store.CreateAuthorization(context.Background(), tx, &influxdb.Authorization{
-				ID:     influxdb.ID(i),
+				ID:     platform.ID(i),
 				Token:  fmt.Sprintf("randomtoken%d", i),
-				OrgID:  influxdb.ID(i),
-				UserID: influxdb.ID(i),
+				OrgID:  platform.ID(i),
+				UserID: platform.ID(i),
 				Status: influxdb.Active,
 			})
 
@@ -54,10 +57,10 @@ func TestAuth(t *testing.T) {
 				expected := []*influxdb.Authorization{}
 				for i := 1; i <= 10; i++ {
 					expected = append(expected, &influxdb.Authorization{
-						ID:     influxdb.ID(i),
+						ID:     platform.ID(i),
 						Token:  fmt.Sprintf("randomtoken%d", i),
-						OrgID:  influxdb.ID(i),
-						UserID: influxdb.ID(i),
+						OrgID:  platform.ID(i),
+						UserID: platform.ID(i),
 						Status: "active",
 					})
 				}
@@ -67,10 +70,10 @@ func TestAuth(t *testing.T) {
 
 				// should not be able to create two authorizations with identical tokens
 				err = store.CreateAuthorization(context.Background(), tx, &influxdb.Authorization{
-					ID:     influxdb.ID(1),
+					ID:     platform.ID(1),
 					Token:  fmt.Sprintf("randomtoken%d", 1),
-					OrgID:  influxdb.ID(1),
-					UserID: influxdb.ID(1),
+					OrgID:  platform.ID(1),
+					UserID: platform.ID(1),
 				})
 				if err == nil {
 					t.Fatalf("expected to be unable to create authorizations with identical tokens")
@@ -83,14 +86,14 @@ func TestAuth(t *testing.T) {
 			results: func(t *testing.T, store *Store, tx kv.Tx) {
 				for i := 1; i <= 10; i++ {
 					expectedAuth := &influxdb.Authorization{
-						ID:     influxdb.ID(i),
+						ID:     platform.ID(i),
 						Token:  fmt.Sprintf("randomtoken%d", i),
-						OrgID:  influxdb.ID(i),
-						UserID: influxdb.ID(i),
+						OrgID:  platform.ID(i),
+						UserID: platform.ID(i),
 						Status: influxdb.Active,
 					}
 
-					authByID, err := store.GetAuthorizationByID(context.Background(), tx, influxdb.ID(i))
+					authByID, err := store.GetAuthorizationByID(context.Background(), tx, platform.ID(i))
 					if err != nil {
 						t.Fatalf("Unexpectedly could not acquire Authorization by ID [Error]: %v", err)
 					}
@@ -116,14 +119,14 @@ func TestAuth(t *testing.T) {
 			setup: setup,
 			update: func(t *testing.T, store *Store, tx kv.Tx) {
 				for i := 1; i <= 10; i++ {
-					auth, err := store.GetAuthorizationByID(context.Background(), tx, influxdb.ID(i))
+					auth, err := store.GetAuthorizationByID(context.Background(), tx, platform.ID(i))
 					if err != nil {
 						t.Fatalf("Could not get authorization [Error]: %v", err)
 					}
 
 					auth.Status = influxdb.Inactive
 
-					_, err = store.UpdateAuthorization(context.Background(), tx, influxdb.ID(i), auth)
+					_, err = store.UpdateAuthorization(context.Background(), tx, platform.ID(i), auth)
 					if err != nil {
 						t.Fatalf("Could not get updated authorization [Error]: %v", err)
 					}
@@ -132,16 +135,16 @@ func TestAuth(t *testing.T) {
 			results: func(t *testing.T, store *Store, tx kv.Tx) {
 
 				for i := 1; i <= 10; i++ {
-					auth, err := store.GetAuthorizationByID(context.Background(), tx, influxdb.ID(i))
+					auth, err := store.GetAuthorizationByID(context.Background(), tx, platform.ID(i))
 					if err != nil {
 						t.Fatalf("Could not get authorization [Error]: %v", err)
 					}
 
 					expectedAuth := &influxdb.Authorization{
-						ID:     influxdb.ID(i),
+						ID:     platform.ID(i),
 						Token:  fmt.Sprintf("randomtoken%d", i),
-						OrgID:  influxdb.ID(i),
-						UserID: influxdb.ID(i),
+						OrgID:  platform.ID(i),
+						UserID: platform.ID(i),
 						Status: influxdb.Inactive,
 					}
 
@@ -156,7 +159,7 @@ func TestAuth(t *testing.T) {
 			setup: setup,
 			update: func(t *testing.T, store *Store, tx kv.Tx) {
 				for i := 1; i <= 10; i++ {
-					err := store.DeleteAuthorization(context.Background(), tx, influxdb.ID(i))
+					err := store.DeleteAuthorization(context.Background(), tx, platform.ID(i))
 					if err != nil {
 						t.Fatalf("Could not delete authorization [Error]: %v", err)
 					}
@@ -164,7 +167,7 @@ func TestAuth(t *testing.T) {
 			},
 			results: func(t *testing.T, store *Store, tx kv.Tx) {
 				for i := 1; i <= 10; i++ {
-					_, err := store.GetAuthorizationByID(context.Background(), tx, influxdb.ID(i))
+					_, err := store.GetAuthorizationByID(context.Background(), tx, platform.ID(i))
 					if err == nil {
 						t.Fatal("Authorization was not deleted correctly")
 					}
@@ -224,9 +227,94 @@ func TestAuth(t *testing.T) {
 	}
 }
 
+func TestAuthBucketNotExists(t *testing.T) {
+	store := inmem.NewKVStore()
+	if err := all.Up(context.Background(), zaptest.NewLogger(t), store); err != nil {
+		t.Fatal(err)
+	}
+
+	ts, err := NewStore(store)
+	require.NoError(t, err)
+
+	bucketID := platform.ID(1)
+	tenant := tenant.NewStore(store)
+	err = tenant.Update(context.Background(), func(tx kv.Tx) error {
+		err := tenant.CreateBucket(context.Background(), tx, &influxdb.Bucket{
+			ID:    bucketID,
+			OrgID: platform.ID(10),
+			Name:  "testbucket",
+		})
+		if err != nil {
+			return err
+		}
+
+		b, err := tenant.GetBucketByName(context.Background(), tx, platform.ID(10), "testbucket")
+		if err != nil {
+			return err
+		}
+
+		bucketID = b.ID
+
+		return nil
+	})
+	require.NoError(t, err)
+
+	perm1, err := influxdb.NewPermissionAtID(
+		bucketID,
+		influxdb.ReadAction,
+		influxdb.BucketsResourceType,
+		platform.ID(10),
+	)
+	require.NoError(t, err)
+
+	perm2, err := influxdb.NewPermissionAtID(
+		platform.ID(2),
+		influxdb.ReadAction,
+		influxdb.BucketsResourceType,
+		platform.ID(10),
+	)
+	require.NoError(t, err)
+
+	err = ts.Update(context.Background(), func(tx kv.Tx) error {
+		err = ts.CreateAuthorization(context.Background(), tx, &influxdb.Authorization{
+			ID:     platform.ID(1),
+			Token:  "buckettoken",
+			OrgID:  platform.ID(10),
+			UserID: platform.ID(4),
+			Status: influxdb.Active,
+			Permissions: []influxdb.Permission{
+				*perm1,
+			},
+		})
+
+		return err
+	})
+
+	require.NoErrorf(t, err, "Authorization creating should have succeeded")
+
+	err = ts.Update(context.Background(), func(tx kv.Tx) error {
+		err = ts.CreateAuthorization(context.Background(), tx, &influxdb.Authorization{
+			ID:     platform.ID(1),
+			Token:  "buckettoken",
+			OrgID:  platform.ID(10),
+			UserID: platform.ID(4),
+			Status: influxdb.Active,
+			Permissions: []influxdb.Permission{
+				*perm2,
+			},
+		})
+
+		return err
+	})
+
+	if err == nil || err != ErrBucketNotFound {
+		t.Fatalf("Authorization creating should have failed with ErrBucketNotFound [Error]: %v", err)
+	}
+}
+
 func Test_filterAuthorizationsFn(t *testing.T) {
 	var (
-		otherID = influxdb.ID(999)
+		otherID = platform.ID(999)
 	)
 
 	auth := influxdb.Authorization{

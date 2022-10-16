@@ -40,6 +40,13 @@ func GroupOptionNilSortLo() GroupOption {
 	}
 }
 
+// IsLastDescendingGroupOptimization checks if this request is using the `last` aggregate type.
+// It returns true if an ascending cursor should be used (all other conditions)
+// or a descending cursor (when `last` is used).
+func IsLastDescendingGroupOptimization(req *datatypes.ReadGroupRequest) bool {
+	return req.Aggregate != nil && req.Aggregate.Type == datatypes.Aggregate_AggregateTypeLast
+}
+
 func NewGroupResultSet(ctx context.Context, req *datatypes.ReadGroupRequest, newSeriesCursorFn func() (SeriesCursor, error), opts ...GroupOption) GroupResultSet {
 	g := &groupResultSet{
 		ctx:               ctx,
@@ -54,14 +61,15 @@ func NewGroupResultSet(ctx context.Context, req *datatypes.ReadGroupRequest, new
 		o(g)
 	}
 
-	g.arrayCursors = newMultiShardArrayCursors(ctx, req.Range.Start, req.Range.End, true)
+	ascending := !IsLastDescendingGroupOptimization(req)
+	g.arrayCursors = newMultiShardArrayCursors(ctx, req.Range.GetStart(), req.Range.GetEnd(), ascending)
 
 	for i, k := range req.GroupKeys {
 		g.keys[i] = []byte(k)
 	}
 
 	switch req.Group {
-	case datatypes.GroupBy:
+	case datatypes.ReadGroupRequest_GroupBy:
 		g.nextGroupFn = groupByNextGroup
 		g.groupByCursor = groupByCursor{
 			ctx:          ctx,
@@ -74,7 +82,7 @@ func NewGroupResultSet(ctx context.Context, req *datatypes.ReadGroupRequest, new
 			return nil
 		}
 
-	case datatypes.GroupNone:
+	case datatypes.ReadGroupRequest_GroupNone:
 		g.nextGroupFn = groupNoneNextGroup
 
 		if n, err := g.groupNoneSort(); n == 0 || err != nil {
@@ -167,7 +175,7 @@ func (g *groupResultSet) groupNoneSort() (int, error) {
 		return 0, nil
 	}
 
-	allTime := g.req.Hints.HintSchemaAllTime()
+	allTime := datatypes.HintFlags(g.req.Hints).HintSchemaAllTime()
 	g.km.Clear()
 	n := 0
 	seriesRow := seriesCursor.Next()
@@ -219,7 +227,7 @@ func (g *groupResultSet) groupBySort() (int, error) {
 	var seriesRows []*SeriesRow
 	vals := make([][]byte, len(g.keys))
 	tagsBuf := &tagsBuffer{sz: 4096}
-	allTime := g.req.Hints.HintSchemaAllTime()
+	allTime := datatypes.HintFlags(g.req.Hints).HintSchemaAllTime()
 
 	seriesRow := seriesCursor.Next()
 	for seriesRow != nil {

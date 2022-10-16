@@ -8,6 +8,7 @@ import (
 
 	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/influxql/query"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/tsdb"
 	"github.com/influxdata/influxdb/v2/v1/services/meta"
 	"github.com/influxdata/influxql"
@@ -30,7 +31,7 @@ type LocalShardMapper struct {
 		ShardGroup(ids []uint64) tsdb.ShardGroup
 	}
 
-	DBRP influxdb.DBRPMappingServiceV2
+	DBRP influxdb.DBRPMappingService
 }
 
 // MapShards maps the sources to the appropriate shards into an IteratorCreator.
@@ -48,7 +49,7 @@ func (e *LocalShardMapper) MapShards(ctx context.Context, sources influxql.Sourc
 	return a, nil
 }
 
-func (e *LocalShardMapper) mapShards(ctx context.Context, a *LocalShardMapping, sources influxql.Sources, tmin, tmax time.Time, orgID influxdb.ID) error {
+func (e *LocalShardMapper) mapShards(ctx context.Context, a *LocalShardMapping, sources influxql.Sources, tmin, tmax time.Time, orgID platform.ID) error {
 	for _, s := range sources {
 		switch s := s.(type) {
 		case *influxql.Measurement:
@@ -61,10 +62,11 @@ func (e *LocalShardMapper) mapShards(ctx context.Context, a *LocalShardMapping, 
 			// using.
 			if _, ok := a.ShardMap[source]; !ok {
 				// lookup bucket and create info
-				mappings, _, err := e.DBRP.FindMany(ctx, influxdb.DBRPMappingFilterV2{
+				mappings, _, err := e.DBRP.FindMany(ctx, influxdb.DBRPMappingFilter{
 					OrgID:           &orgID,
 					Database:        &s.Database,
 					RetentionPolicy: &s.RetentionPolicy,
+					Virtual:         nil,
 				})
 				if err != nil {
 					return fmt.Errorf("finding DBRP mappings: %v", err)
@@ -128,9 +130,6 @@ func (a *LocalShardMapping) FieldDimensions(ctx context.Context, m *influxql.Mea
 		return
 	}
 
-	fields = make(map[string]influxql.DataType)
-	dimensions = make(map[string]struct{})
-
 	var measurements []string
 	if m.Regex != nil {
 		measurements = sg.MeasurementsByRegex(m.Regex.Val)
@@ -142,13 +141,8 @@ func (a *LocalShardMapping) FieldDimensions(ctx context.Context, m *influxql.Mea
 	if err != nil {
 		return nil, nil, err
 	}
-	for k, typ := range f {
-		fields[k] = typ
-	}
-	for k := range d {
-		dimensions[k] = struct{}{}
-	}
-	return
+
+	return f, d, nil
 }
 
 func (a *LocalShardMapping) MapType(ctx context.Context, m *influxql.Measurement, field string) influxql.DataType {
@@ -250,7 +244,7 @@ func (a *LocalShardMapping) IteratorCost(ctx context.Context, m *influxql.Measur
 		var costs query.IteratorCost
 		measurements := sg.MeasurementsByRegex(m.Regex.Val)
 		for _, measurement := range measurements {
-			cost, err := sg.IteratorCost(measurement, opt)
+			cost, err := sg.IteratorCost(ctx, measurement, opt)
 			if err != nil {
 				return query.IteratorCost{}, err
 			}
@@ -258,7 +252,7 @@ func (a *LocalShardMapping) IteratorCost(ctx context.Context, m *influxql.Measur
 		}
 		return costs, nil
 	}
-	return sg.IteratorCost(m.Name, opt)
+	return sg.IteratorCost(ctx, m.Name, opt)
 }
 
 // Close clears out the list of mapped shards.

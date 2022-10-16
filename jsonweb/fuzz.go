@@ -1,6 +1,8 @@
-// +build gofuzz
+//go:build gofuzz
 
 package jsonweb
+
+// TODO(DStrand1): Convert this to Go 1.18's new Fuzzing with testing.F
 
 // FuzzJsonWeb is the entry point for fuzzing when built with go-fuzz-build.
 func FuzzJsonWeb(data []byte) int {

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"time"
 	"unsafe"
 
 	"github.com/cespare/xxhash"
@@ -20,6 +21,7 @@ import (
 	"github.com/influxdata/influxdb/v2/tsdb"
 	"github.com/influxdata/influxql"
 	"go.uber.org/zap"
+	"golang.org/x/sync/errgroup"
 )
 
 // IndexName is the name of the index.
@@ -42,6 +44,7 @@ func init() {
 		idx := NewIndex(sfile, db,
 			WithPath(path),
 			WithMaximumLogFileSize(int64(opt.Config.MaxIndexLogFileSize)),
+			WithMaximumLogFileAge(time.Duration(opt.Config.CompactFullWriteColdDuration)),
 			WithSeriesIDCacheSize(opt.Config.SeriesIDSetCacheSize),
 		)
 		return idx
@@ -88,6 +91,12 @@ var WithMaximumLogFileSize = func(size int64) IndexOption {
 	}
 }
 
+var WithMaximumLogFileAge = func(dur time.Duration) IndexOption {
+	return func(i *Index) {
+		i.maxLogFileAge = dur
+	}
+}
+
 // DisableFsync disables flushing and syncing of underlying files. Primarily this
 // impacts the LogFiles. This option can be set when working with the index in
 // an offline manner, for cases where a hard failure can be overcome by re-running the tooling.
@@ -130,12 +139,13 @@ type Index struct {
 	tagValueCacheSize int
 
 	// The following may be set when initializing an Index.
-	path               string      // Root directory of the index partitions.
-	disableCompactions bool        // Initially disables compactions on the index.
-	maxLogFileSize     int64       // Maximum size of a LogFile before it's compacted.
-	logfileBufferSize  int         // The size of the buffer used by the LogFile.
-	disableFsync       bool        // Disables flushing buffers and fsyning files. Used when working with indexes offline.
-	logger             *zap.Logger // Index's logger.
+	path               string        // Root directory of the index partitions.
+	disableCompactions bool          // Initially disables compactions on the index.
+	maxLogFileSize     int64         // Maximum size of a LogFile before it's compacted.
+	maxLogFileAge      time.Duration // Maximum age of a LogFile before it's compacted.
+	logfileBufferSize  int           // The size of the buffer used by the LogFile.
+	disableFsync       bool          // Disables flushing buffers and fsyning files. Used when working with indexes offline.
+	logger             *zap.Logger   // Index's logger.
 
 	// The following must be set when initializing an Index.
 	sfile    *tsdb.SeriesFile // series lookup file
@@ -161,6 +171,7 @@ func NewIndex(sfile *tsdb.SeriesFile, database string, options ...IndexOption) *
 	idx := &Index{
 		tagValueCacheSize: tsdb.DefaultSeriesIDSetCacheSize,
 		maxLogFileSize:    tsdb.DefaultMaxIndexLogFileSize,
+		maxLogFileAge:     tsdb.DefaultCompactFullWriteColdDuration,
 		logger:            zap.NewNop(),
 		version:           Version,
 		sfile:             sfile,
@@ -193,6 +204,7 @@ func (i *Index) Bytes() int {
 	b += int(unsafe.Sizeof(i.path)) + len(i.path)
 	b += int(unsafe.Sizeof(i.disableCompactions))
 	b += int(unsafe.Sizeof(i.maxLogFileSize))
+	b += int(unsafe.Sizeof(i.maxLogFileAge))
 	b += int(unsafe.Sizeof(i.logger))
 	b += int(unsafe.Sizeof(i.sfile))
 	// Do not count SeriesFile because it belongs to the code that constructed this Index.
@@ -241,7 +253,7 @@ func (i *Index) SeriesIDSet() *tsdb.SeriesIDSet {
 }
 
 // Open opens the index.
-func (i *Index) Open() error {
+func (i *Index) Open() (rErr error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 
@@ -259,6 +271,7 @@ func (i *Index) Open() error {
 	for j := 0; j < len(i.partitions); j++ {
 		p := NewPartition(i.sfile, filepath.Join(i.path, fmt.Sprint(j)))
 		p.MaxLogFileSize = i.maxLogFileSize
+		p.MaxLogFileAge = i.maxLogFileAge
 		p.nosync = i.disableFsync
 		p.logbufferSize = i.logfileBufferSize
 		p.logger = i.logger.With(zap.String("tsi1_partition", fmt.Sprint(j+1)))
@@ -269,29 +282,16 @@ func (i *Index) Open() error {
 	partitionN := len(i.partitions)
 	n := i.availableThreads()
 
-	// Store results.
-	errC := make(chan error, partitionN)
-
 	// Run fn on each partition using a fixed number of goroutines.
-	var pidx uint32 // Index of maximum Partition being worked on.
-	for k := 0; k < n; k++ {
-		go func(k int) {
-			for {
-				idx := int(atomic.AddUint32(&pidx, 1) - 1) // Get next partition to work on.
-				if idx >= partitionN {
-					return // No more work.
-				}
-				err := i.partitions[idx].Open()
-				errC <- err
-			}
-		}(k)
+	g := new(errgroup.Group)
+	g.SetLimit(n)
+	for idx := 0; idx < partitionN; idx++ {
+		g.Go(i.partitions[idx].Open)
 	}
-
-	// Check for error
-	for i := 0; i < partitionN; i++ {
-		if err := <-errC; err != nil {
-			return err
-		}
+	err := g.Wait()
+	defer i.cleanUpFail(&rErr)
+	if err != nil {
+		return err
 	}
 
 	// Refresh cached sketches.
@@ -305,6 +305,12 @@ func (i *Index) Open() error {
 	i.opened = true
 	i.logger.Info(fmt.Sprintf("index opened with %d partitions", partitionN))
 	return nil
+}
+
+func (i *Index) cleanUpFail(err *error) {
+	if nil != *err {
+		i.close()
+	}
 }
 
 // Compact requests a compaction of partitions.
@@ -340,16 +346,24 @@ func (i *Index) Close() error {
 	// Lock index and close partitions.
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	return i.close()
+}
 
+// close closes the index without locking
+func (i *Index) close() (rErr error) {
 	for _, p := range i.partitions {
-		if err := p.Close(); err != nil {
-			return err
+		if (p != nil) && p.IsOpen() {
+			if pErr := p.Close(); pErr != nil {
+				i.logger.Warn("Failed to clean up partition", zap.String("path", p.Path()))
+				if rErr == nil {
+					rErr = pErr
+				}
+			}
 		}
 	}
-
 	// Mark index as closed.
 	i.opened = false
-	return nil
+	return rErr
 }
 
 // Path returns the path the index was opened with.
@@ -385,9 +399,9 @@ func (i *Index) updateMeasurementSketches() error {
 	for j := 0; j < int(i.PartitionN); j++ {
 		if s, t, err := i.partitions[j].MeasurementsSketches(); err != nil {
 			return err
-		} else if i.mSketch.Merge(s); err != nil {
+		} else if err := i.mSketch.Merge(s); err != nil {
 			return err
-		} else if i.mTSketch.Merge(t); err != nil {
+		} else if err := i.mTSketch.Merge(t); err != nil {
 			return err
 		}
 	}
@@ -399,9 +413,9 @@ func (i *Index) updateSeriesSketches() error {
 	for j := 0; j < int(i.PartitionN); j++ {
 		if s, t, err := i.partitions[j].SeriesSketches(); err != nil {
 			return err
-		} else if i.sSketch.Merge(s); err != nil {
+		} else if err := i.sSketch.Merge(s); err != nil {
 			return err
-		} else if i.sTSketch.Merge(t); err != nil {
+		} else if err := i.sTSketch.Merge(t); err != nil {
 			return err
 		}
 	}
@@ -997,6 +1011,7 @@ func (i *Index) TagValueSeriesIDIterator(name, key, value []byte) (tsdb.SeriesID
 	for _, p := range i.partitions {
 		itr, err := p.TagValueSeriesIDIterator(name, key, value)
 		if err != nil {
+			tsdb.SeriesIDIterators(a).Close()
 			return nil, err
 		} else if itr != nil {
 			a = append(a, itr)
@@ -1089,7 +1104,7 @@ func (i *Index) RetainFileSet() (*FileSet, error) {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 
-	fs, _ := NewFileSet(nil, i.sfile, nil)
+	fs := NewFileSet(nil)
 	for _, p := range i.partitions {
 		pfs, err := p.RetainFileSet()
 		if err != nil {
@@ -1099,4 +1114,22 @@ func (i *Index) RetainFileSet() (*FileSet, error) {
 		fs.files = append(fs.files, pfs.files...)
 	}
 	return fs, nil
+}
+
+// IsIndexDir returns true if directory contains at least one partition directory.
+func IsIndexDir(path string) (bool, error) {
+	fis, err := os.ReadDir(path)
+	if err != nil {
+		return false, err
+	}
+	for _, fi := range fis {
+		if !fi.IsDir() {
+			continue
+		} else if ok, err := IsPartitionDir(filepath.Join(path, fi.Name())); err != nil {
+			return false, err
+		} else if ok {
+			return true, nil
+		}
+	}
+	return false, nil
 }

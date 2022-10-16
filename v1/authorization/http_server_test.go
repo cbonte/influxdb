@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -17,25 +17,12 @@ import (
 	"github.com/influxdata/httprouter"
 	"github.com/influxdata/influxdb/v2"
 	icontext "github.com/influxdata/influxdb/v2/context"
-	"github.com/influxdata/influxdb/v2/inmem"
-	"github.com/influxdata/influxdb/v2/kv"
-	"github.com/influxdata/influxdb/v2/kv/migration/all"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/mock"
 	itesting "github.com/influxdata/influxdb/v2/testing"
 	"go.uber.org/zap/zaptest"
 )
-
-func NewTestInmemStore(t *testing.T) (kv.Store, func(), error) {
-	t.Helper()
-
-	store := inmem.NewKVStore()
-
-	if err := all.Up(context.Background(), zaptest.NewLogger(t), store); err != nil {
-		t.Fatal(err)
-	}
-
-	return store, func() {}, nil
-}
 
 func TestService_handlePostAuthorization(t *testing.T) {
 	type fields struct {
@@ -62,19 +49,19 @@ func TestService_handlePostAuthorization(t *testing.T) {
 				},
 			},
 			TenantService: &tenantService{
-				FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+				FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 					return &influxdb.User{
 						ID:   id,
 						Name: "u1",
 					}, nil
 				},
-				FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+				FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 					return &influxdb.Organization{
 						ID:   id,
 						Name: "o1",
 					}, nil
 				},
-				FindBucketByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Bucket, error) {
+				FindBucketByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Bucket, error) {
 					return &influxdb.Bucket{
 						ID:   id,
 						Name: "b1",
@@ -198,11 +185,7 @@ func TestService_handlePostAuthorization(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Helper()
 
-			s, _, err := NewTestInmemStore(t)
-			if err != nil {
-				t.Fatal(err)
-			}
-
+			s := itesting.NewTestInmemStore(t)
 			storage, err := NewStore(s)
 			if err != nil {
 				t.Fatal(err)
@@ -250,7 +233,7 @@ func TestService_handlePostAuthorization(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Logf("headers: %v body: %s", res.Header, body)
@@ -302,7 +285,7 @@ func TestService_handleGetAuthorization(t *testing.T) {
 			name: "get a authorization by id",
 			fields: fields{
 				AuthorizationService: &mock.AuthorizationService{
-					FindAuthorizationByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Authorization, error) {
+					FindAuthorizationByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Authorization, error) {
 						if id == itesting.MustIDBase16("020f755c3c082000") {
 							return &influxdb.Authorization{
 								ID:     itesting.MustIDBase16("020f755c3c082000"),
@@ -314,7 +297,7 @@ func TestService_handleGetAuthorization(t *testing.T) {
 										Resource: influxdb.Resource{
 											Type:  influxdb.BucketsResourceType,
 											OrgID: itesting.IDPtr(itesting.MustIDBase16("020f755c3c083000")),
-											ID: func() *influxdb.ID {
+											ID: func() *platform.ID {
 												id := itesting.MustIDBase16("020f755c3c084000")
 												return &id
 											}(),
@@ -329,19 +312,19 @@ func TestService_handleGetAuthorization(t *testing.T) {
 					},
 				},
 				TenantService: &tenantService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{
 							ID:   id,
 							Name: "u1",
 						}, nil
 					},
-					FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID:   id,
 							Name: "o1",
 						}, nil
 					},
-					FindBucketByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Bucket, error) {
+					FindBucketByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Bucket, error) {
 						return &influxdb.Bucket{
 							ID:   id,
 							Name: "b1",
@@ -392,9 +375,9 @@ func TestService_handleGetAuthorization(t *testing.T) {
 			name: "not found",
 			fields: fields{
 				AuthorizationService: &mock.AuthorizationService{
-					FindAuthorizationByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Authorization, error) {
-						return nil, &influxdb.Error{
-							Code: influxdb.ENotFound,
+					FindAuthorizationByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Authorization, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "authorization not found",
 						}
 					},
@@ -430,7 +413,7 @@ func TestService_handleGetAuthorization(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Logf("headers: %v body: %s", res.Header, body)
@@ -496,14 +479,14 @@ func TestService_handleGetAuthorizations(t *testing.T) {
 					},
 				},
 				&tenantService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{
 							ID:   id,
 							Name: id.String(),
 						}, nil
 					},
 
-					FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID:   id,
 							Name: id.String(),
@@ -588,16 +571,16 @@ func TestService_handleGetAuthorizations(t *testing.T) {
 					},
 				},
 				&tenantService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						if id.String() == "2070616e656d2076" {
 							return &influxdb.User{
 								ID:   id,
 								Name: id.String(),
 							}, nil
 						}
-						return nil, &influxdb.Error{}
+						return nil, &errors.Error{}
 					},
-					FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID:   id,
 							Name: id.String(),
@@ -664,20 +647,20 @@ func TestService_handleGetAuthorizations(t *testing.T) {
 					},
 				},
 				&tenantService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{
 							ID:   id,
 							Name: id.String(),
 						}, nil
 					},
-					FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 						if id.String() == "3070616e656d2076" {
 							return &influxdb.Organization{
 								ID:   id,
 								Name: id.String(),
 							}, nil
 						}
-						return nil, &influxdb.Error{}
+						return nil, &errors.Error{}
 					},
 				},
 			},
@@ -742,11 +725,7 @@ func TestService_handleGetAuthorizations(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Helper()
 
-			s, _, err := NewTestInmemStore(t)
-			if err != nil {
-				t.Fatal(err)
-			}
-
+			s := itesting.NewTestInmemStore(t)
 			storage, err := NewStore(s)
 			if err != nil {
 				t.Fatal(err)
@@ -774,7 +753,7 @@ func TestService_handleGetAuthorizations(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleGetAuthorizations() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -816,7 +795,7 @@ func TestService_handleDeleteAuthorization(t *testing.T) {
 			name: "remove a authorization by id",
 			fields: fields{
 				&mock.AuthorizationService{
-					DeleteAuthorizationFn: func(ctx context.Context, id influxdb.ID) error {
+					DeleteAuthorizationFn: func(ctx context.Context, id platform.ID) error {
 						if id == itesting.MustIDBase16("020f755c3c082000") {
 							return nil
 						}
@@ -837,9 +816,9 @@ func TestService_handleDeleteAuthorization(t *testing.T) {
 			name: "authorization not found",
 			fields: fields{
 				&mock.AuthorizationService{
-					DeleteAuthorizationFn: func(ctx context.Context, id influxdb.ID) error {
-						return &influxdb.Error{
-							Code: influxdb.ENotFound,
+					DeleteAuthorizationFn: func(ctx context.Context, id platform.ID) error {
+						return &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "authorization not found",
 						}
 					},
@@ -875,7 +854,7 @@ func TestService_handleDeleteAuthorization(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleDeleteAuthorization() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -934,12 +913,12 @@ func jsonDiffErr(s1, s2 string) (diff string, err error) {
 		return s1, fmt.Errorf("s2 is empty")
 	}
 
-	var o1 influxdb.Error
+	var o1 errors.Error
 	if err = json.Unmarshal([]byte(s1), &o1); err != nil {
 		return
 	}
 
-	var o2 influxdb.Error
+	var o2 errors.Error
 	if err = json.Unmarshal([]byte(s2), &o2); err != nil {
 		return
 	}

@@ -3,7 +3,6 @@ package tsm1
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sort"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/influxdata/influxdb/v2/pkg/fs"
+	"github.com/influxdata/influxdb/v2/tsdb"
 	"github.com/influxdata/influxdb/v2/tsdb/cursors"
 	"github.com/stretchr/testify/assert"
 )
@@ -21,7 +21,7 @@ type keyValues struct {
 }
 
 func MustTempDir() string {
-	dir, err := ioutil.TempDir("", "tsm1-test")
+	dir, err := os.MkdirTemp("", "tsm1-test")
 	if err != nil {
 		panic(fmt.Sprintf("failed to create temp dir: %v", err))
 	}
@@ -29,7 +29,7 @@ func MustTempDir() string {
 }
 
 func MustTempFile(dir string) *os.File {
-	f, err := ioutil.TempFile(dir, "tsm1test")
+	f, err := os.CreateTemp(dir, "tsm1test")
 	if err != nil {
 		panic(fmt.Sprintf("failed to create temp file: %v", err))
 	}
@@ -74,7 +74,7 @@ func TestDescendingCursor_SinglePointStartTime(t *testing.T) {
 	t.Run("cache", func(t *testing.T) {
 		dir := MustTempDir()
 		defer os.RemoveAll(dir)
-		fs := NewFileStore(dir)
+		fs := NewFileStore(dir, tsdb.EngineTags{})
 
 		const START, END = 10, 1
 		kc := fs.KeyCursor(context.Background(), []byte("m,_field=v#!~#v"), START, false)
@@ -97,7 +97,7 @@ func TestDescendingCursor_SinglePointStartTime(t *testing.T) {
 	t.Run("tsm", func(t *testing.T) {
 		dir := MustTempDir()
 		defer os.RemoveAll(dir)
-		fs := NewFileStore(dir)
+		fs := NewFileStore(dir, tsdb.EngineTags{})
 
 		const START, END = 10, 1
 
@@ -134,7 +134,7 @@ func TestDescendingCursor_SinglePointStartTime(t *testing.T) {
 func TestFileStore_DuplicatePoints(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := NewFileStore(dir)
+	fs := NewFileStore(dir, tsdb.EngineTags{})
 
 	makeVals := func(ts ...int64) []Value {
 		vals := make([]Value, len(ts))
@@ -160,7 +160,7 @@ func TestFileStore_DuplicatePoints(t *testing.T) {
 	_ = fs.Replace(nil, files)
 
 	t.Run("ascending", func(t *testing.T) {
-		const START, END = 21, 100
+		const START, END = 0, 100
 		kc := fs.KeyCursor(context.Background(), []byte("m,_field=v#!~#v"), START, true)
 		defer kc.Close()
 		cur := newFloatArrayAscendingCursor()
@@ -179,7 +179,7 @@ func TestFileStore_DuplicatePoints(t *testing.T) {
 	})
 
 	t.Run("descending", func(t *testing.T) {
-		const START, END = 51, 0
+		const START, END = 100, 0
 		kc := fs.KeyCursor(context.Background(), []byte("m,_field=v#!~#v"), START, false)
 		defer kc.Close()
 		cur := newFloatArrayDescendingCursor()
@@ -192,7 +192,7 @@ func TestFileStore_DuplicatePoints(t *testing.T) {
 			ar = cur.Next()
 		}
 
-		if exp := []int64{46, 44, 40, 21}; !cmp.Equal(got, exp) {
+		if exp := []int64{51, 46, 44, 40, 21}; !cmp.Equal(got, exp) {
 			t.Errorf("unexpected values; -got/+exp\n%s", cmp.Diff(got, exp))
 		}
 	})
@@ -219,7 +219,7 @@ func (p Int64Slice) Swap(i, j int)      { p[i], p[j] = p[j], p[i] }
 func TestFileStore_MergeBlocksLargerThat1000_SecondEntirelyContained(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := NewFileStore(dir)
+	fs := NewFileStore(dir, tsdb.EngineTags{})
 
 	// makeVals creates count points starting at ts and incrementing by step
 	makeVals := func(ts, count, step int64) []Value {
@@ -321,7 +321,7 @@ func (a *FloatArray) Swap(i, j int) {
 func TestFileStore_MergeBlocksLargerThat1000_MultipleBlocksInEachFile(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := NewFileStore(dir)
+	fs := NewFileStore(dir, tsdb.EngineTags{})
 
 	// makeVals creates count points starting at ts and incrementing by step
 	makeVals := func(ts, count, step int64, v float64) []Value {
@@ -379,8 +379,8 @@ func TestFileStore_MergeBlocksLargerThat1000_MultipleBlocksInEachFile(t *testing
 		}
 
 		assert.Len(t, got.Timestamps, exp.Len())
-		assert.Equal(t, got.Timestamps, exp.Timestamps)
-		assert.Equal(t, got.Values, exp.Values)
+		assert.Equal(t, exp.Timestamps, got.Timestamps)
+		assert.Equal(t, exp.Values, got.Values)
 	})
 
 	t.Run("descending", func(t *testing.T) {
@@ -407,7 +407,152 @@ func TestFileStore_MergeBlocksLargerThat1000_MultipleBlocksInEachFile(t *testing
 		}
 
 		assert.Len(t, got.Timestamps, exp.Len())
-		assert.Equal(t, got.Timestamps, exp.Timestamps)
-		assert.Equal(t, got.Values, exp.Values)
+		assert.Equal(t, exp.Timestamps, got.Timestamps)
+		assert.Equal(t, exp.Values, got.Values)
+	})
+}
+
+func TestFileStore_SeekBoundaries(t *testing.T) {
+	dir := MustTempDir()
+	defer os.RemoveAll(dir)
+	fs := NewFileStore(dir, tsdb.EngineTags{})
+
+	// makeVals creates count points starting at ts and incrementing by step
+	makeVals := func(ts, count, step int64, v float64) []Value {
+		vals := make([]Value, count)
+		for i := range vals {
+			vals[i] = NewFloatValue(ts, v)
+			ts += step
+		}
+		return vals
+	}
+
+	makeArray := func(ts, count, step int64, v float64) *cursors.FloatArray {
+		ar := cursors.NewFloatArrayLen(int(count))
+		for i := range ar.Timestamps {
+			ar.Timestamps[i] = ts
+			ar.Values[i] = v
+			ts += step
+		}
+		return ar
+	}
+
+	// Setup 2 files where the seek time matches the end time.
+	data := []keyValues{
+		{"m,_field=v#!~#v", makeVals(1000, 100, 1, 1.01)},
+		{"m,_field=v#!~#v", makeVals(1100, 100, 1, 2.01)},
+	}
+
+	files, err := newFiles(dir, data...)
+	if err != nil {
+		t.Fatalf("unexpected error creating files: %s", err)
+	}
+
+	_ = fs.Replace(nil, files)
+
+	t.Run("ascending full", func(t *testing.T) {
+		const START, END = 1000, 1099
+		kc := fs.KeyCursor(context.Background(), []byte("m,_field=v#!~#v"), START, true)
+		defer kc.Close()
+		cur := newFloatArrayAscendingCursor()
+		cur.reset(START, END, nil, kc)
+
+		exp := makeArray(1000, 100, 1, 1.01)
+
+		got := cursors.NewFloatArrayLen(exp.Len())
+		got.Timestamps = got.Timestamps[:0]
+		got.Values = got.Values[:0]
+
+		ar := cur.Next()
+		for ar.Len() > 0 {
+			got.Timestamps = append(got.Timestamps, ar.Timestamps...)
+			got.Values = append(got.Values, ar.Values...)
+			ar = cur.Next()
+		}
+
+		assert.Len(t, got.Timestamps, exp.Len())
+		assert.Equal(t, exp.Timestamps, got.Timestamps)
+		assert.Equal(t, exp.Values, got.Values)
+	})
+
+	t.Run("ascending split", func(t *testing.T) {
+		const START, END = 1050, 1149
+		kc := fs.KeyCursor(context.Background(), []byte("m,_field=v#!~#v"), START, true)
+		defer kc.Close()
+		cur := newFloatArrayAscendingCursor()
+		cur.reset(START, END, nil, kc)
+
+		exp := makeArray(1050, 50, 1, 1.01)
+		a2 := makeArray(1100, 50, 1, 2.01)
+		exp.Merge(a2)
+
+		got := cursors.NewFloatArrayLen(exp.Len())
+		got.Timestamps = got.Timestamps[:0]
+		got.Values = got.Values[:0]
+
+		ar := cur.Next()
+		for ar.Len() > 0 {
+			got.Timestamps = append(got.Timestamps, ar.Timestamps...)
+			got.Values = append(got.Values, ar.Values...)
+			ar = cur.Next()
+		}
+
+		assert.Len(t, got.Timestamps, exp.Len())
+		assert.Equal(t, exp.Timestamps, got.Timestamps)
+		assert.Equal(t, exp.Values, got.Values)
+	})
+
+	t.Run("descending full", func(t *testing.T) {
+		const START, END = 1099, 1000
+		kc := fs.KeyCursor(context.Background(), []byte("m,_field=v#!~#v"), START, false)
+		defer kc.Close()
+		cur := newFloatArrayDescendingCursor()
+		cur.reset(START, END, nil, kc)
+
+		exp := makeArray(1000, 100, 1, 1.01)
+		sort.Sort(sort.Reverse(&FloatArray{exp}))
+
+		got := cursors.NewFloatArrayLen(exp.Len())
+		got.Timestamps = got.Timestamps[:0]
+		got.Values = got.Values[:0]
+
+		ar := cur.Next()
+		for ar.Len() > 0 {
+			got.Timestamps = append(got.Timestamps, ar.Timestamps...)
+			got.Values = append(got.Values, ar.Values...)
+			ar = cur.Next()
+		}
+
+		assert.Len(t, got.Timestamps, exp.Len())
+		assert.Equal(t, exp.Timestamps, got.Timestamps)
+		assert.Equal(t, exp.Values, got.Values)
+	})
+
+	t.Run("descending split", func(t *testing.T) {
+		const START, END = 1149, 1050
+		kc := fs.KeyCursor(context.Background(), []byte("m,_field=v#!~#v"), START, false)
+		defer kc.Close()
+		cur := newFloatArrayDescendingCursor()
+		cur.reset(START, END, nil, kc)
+
+		exp := makeArray(1050, 50, 1, 1.01)
+		a2 := makeArray(1100, 50, 1, 2.01)
+		exp.Merge(a2)
+		sort.Sort(sort.Reverse(&FloatArray{exp}))
+
+		got := cursors.NewFloatArrayLen(exp.Len())
+		got.Timestamps = got.Timestamps[:0]
+		got.Values = got.Values[:0]
+
+		ar := cur.Next()
+		for ar.Len() > 0 {
+			got.Timestamps = append(got.Timestamps, ar.Timestamps...)
+			got.Values = append(got.Values, ar.Values...)
+			ar = cur.Next()
+		}
+
+		assert.Len(t, got.Timestamps, exp.Len())
+		assert.Equal(t, exp.Timestamps, got.Timestamps)
+		assert.Equal(t, exp.Values, got.Values)
 	})
 }

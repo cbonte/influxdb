@@ -13,6 +13,8 @@ import (
 	v1 "github.com/influxdata/flux/stdlib/influxdata/influxdb/v1"
 	"github.com/influxdata/flux/values"
 	platform "github.com/influxdata/influxdb/v2"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
+	errors2 "github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/query"
 	"github.com/pkg/errors"
 )
@@ -38,10 +40,10 @@ func (s *LocalDatabasesProcedureSpec) Copy() plan.ProcedureSpec {
 }
 
 type DatabasesDecoder struct {
-	orgID     platform.ID
+	orgID     platform2.ID
 	deps      *DatabasesDependencies
-	databases []*platform.DBRPMappingV2
-	alloc     *memory.Allocator
+	databases []*platform.DBRPMapping
+	alloc     memory.Allocator
 }
 
 func (bd *DatabasesDecoder) Connect(ctx context.Context) error {
@@ -49,7 +51,7 @@ func (bd *DatabasesDecoder) Connect(ctx context.Context) error {
 }
 
 func (bd *DatabasesDecoder) Fetch(ctx context.Context) (bool, error) {
-	b, _, err := bd.deps.DBRP.FindMany(ctx, platform.DBRPMappingFilterV2{})
+	b, _, err := bd.deps.DBRP.FindMany(ctx, platform.DBRPMappingFilter{})
 	if err != nil {
 		return false, err
 	}
@@ -59,7 +61,7 @@ func (bd *DatabasesDecoder) Fetch(ctx context.Context) (bool, error) {
 
 func (bd *DatabasesDecoder) Decode(ctx context.Context) (flux.Table, error) {
 	type databaseInfo struct {
-		*platform.DBRPMappingV2
+		*platform.DBRPMapping
 		RetentionPeriod time.Duration
 	}
 
@@ -67,21 +69,21 @@ func (bd *DatabasesDecoder) Decode(ctx context.Context) (flux.Table, error) {
 	for _, db := range bd.databases {
 		bucket, err := bd.deps.BucketLookup.FindBucketByID(ctx, db.BucketID)
 		if err != nil {
-			code := platform.ErrorCode(err)
-			if code == platform.EUnauthorized || code == platform.EForbidden {
+			code := errors2.ErrorCode(err)
+			if code == errors2.EUnauthorized || code == errors2.EForbidden {
 				continue
 			}
 			return nil, err
 		}
 		databases = append(databases, databaseInfo{
-			DBRPMappingV2:   db,
+			DBRPMapping:     db,
 			RetentionPeriod: bucket.RetentionPeriod,
 		})
 	}
 
 	if len(databases) == 0 {
-		return nil, &platform.Error{
-			Code: platform.ENotFound,
+		return nil, &errors2.Error{
+			Code: errors2.ENotFound,
 			Msg:  "no 1.x databases found",
 		}
 	}
@@ -169,7 +171,7 @@ type key int
 const dependenciesKey key = iota
 
 type DatabasesDependencies struct {
-	DBRP         platform.DBRPMappingServiceV2
+	DBRP         platform.DBRPMappingService
 	BucketLookup platform.BucketService
 }
 
@@ -198,7 +200,7 @@ func (rule LocalDatabasesRule) Name() string {
 }
 
 func (rule LocalDatabasesRule) Pattern() plan.Pattern {
-	return plan.Pat(v1.DatabasesKind)
+	return plan.MultiSuccessor(v1.DatabasesKind)
 }
 
 func (rule LocalDatabasesRule) Rewrite(ctx context.Context, node plan.Node) (plan.Node, bool, error) {

@@ -7,15 +7,30 @@ import (
 	"testing"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kv"
 	"github.com/influxdata/influxdb/v2/tenant"
+	itesting "github.com/influxdata/influxdb/v2/testing"
 )
 
 func TestUser(t *testing.T) {
 	simpleSetup := func(t *testing.T, store *tenant.Store, tx kv.Tx) {
 		for i := 1; i <= 10; i++ {
 			err := store.CreateUser(context.Background(), tx, &influxdb.User{
-				ID:     influxdb.ID(i),
+				ID:     platform.ID(i),
+				Name:   fmt.Sprintf("user%d", i),
+				Status: "active",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	over20Setup := func(t *testing.T, store *tenant.Store, tx kv.Tx) {
+		for i := 1; i <= 22; i++ {
+			err := store.CreateUser(context.Background(), tx, &influxdb.User{
+				ID:     platform.ID(i),
 				Name:   fmt.Sprintf("user%d", i),
 				Status: "active",
 			})
@@ -47,13 +62,31 @@ func TestUser(t *testing.T) {
 				expected := []*influxdb.User{}
 				for i := 1; i <= 10; i++ {
 					expected = append(expected, &influxdb.User{
-						ID:     influxdb.ID(i),
+						ID:     platform.ID(i),
 						Name:   fmt.Sprintf("user%d", i),
 						Status: "active",
 					})
 				}
 				if !reflect.DeepEqual(users, expected) {
 					t.Fatalf("expected identical users: \n%+v\n%+v", users, expected)
+				}
+
+				// Test that identical name causes an error
+				err = store.CreateUser(context.Background(), tx, &influxdb.User{
+					ID:   platform.ID(11), // Unique ID
+					Name: "user1",         // Non-unique name
+				})
+				if err == nil {
+					t.Fatal("expected error on creating user with identical username")
+				}
+
+				// Test that identical ID causes an error
+				err = store.CreateUser(context.Background(), tx, &influxdb.User{
+					ID:   platform.ID(1), // Non-unique ID
+					Name: "user11",       // Unique name
+				})
+				if err == nil {
+					t.Fatal("expected error on creating user with identical ID")
 				}
 			},
 		},
@@ -111,7 +144,7 @@ func TestUser(t *testing.T) {
 				expected := []*influxdb.User{}
 				for i := 1; i <= 10; i++ {
 					expected = append(expected, &influxdb.User{
-						ID:     influxdb.ID(i),
+						ID:     platform.ID(i),
 						Name:   fmt.Sprintf("user%d", i),
 						Status: "active",
 					})
@@ -146,23 +179,37 @@ func TestUser(t *testing.T) {
 			},
 		},
 		{
+			name:  "listOver20",
+			setup: over20Setup,
+			results: func(t *testing.T, store *tenant.Store, tx kv.Tx) {
+				users, err := store.ListUsers(context.Background(), tx)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				if len(users) != 22 {
+					t.Fatalf("expected 10 users got: %d", len(users))
+				}
+			},
+		},
+		{
 			name:  "update",
 			setup: simpleSetup,
 			update: func(t *testing.T, store *tenant.Store, tx kv.Tx) {
 				user5 := "user5"
-				_, err := store.UpdateUser(context.Background(), tx, influxdb.ID(3), influxdb.UserUpdate{Name: &user5})
+				_, err := store.UpdateUser(context.Background(), tx, platform.ID(3), influxdb.UserUpdate{Name: &user5})
 				if err.Error() != tenant.UserAlreadyExistsError(user5).Error() {
 					t.Fatal("failed to error on duplicate username")
 				}
 
 				user30 := "user30"
-				_, err = store.UpdateUser(context.Background(), tx, influxdb.ID(3), influxdb.UserUpdate{Name: &user30})
+				_, err = store.UpdateUser(context.Background(), tx, platform.ID(3), influxdb.UserUpdate{Name: &user30})
 				if err != nil {
 					t.Fatal(err)
 				}
 
 				inactive := influxdb.Status("inactive")
-				_, err = store.UpdateUser(context.Background(), tx, influxdb.ID(3), influxdb.UserUpdate{Status: &inactive})
+				_, err = store.UpdateUser(context.Background(), tx, platform.ID(3), influxdb.UserUpdate{Status: &inactive})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -180,7 +227,7 @@ func TestUser(t *testing.T) {
 				expected := []*influxdb.User{}
 				for i := 1; i <= 10; i++ {
 					expected = append(expected, &influxdb.User{
-						ID:     influxdb.ID(i),
+						ID:     platform.ID(i),
 						Name:   fmt.Sprintf("user%d", i),
 						Status: "active",
 					})
@@ -226,7 +273,7 @@ func TestUser(t *testing.T) {
 				for i := 1; i <= 10; i++ {
 					if i != 1 && i != 3 {
 						expected = append(expected, &influxdb.User{
-							ID:     influxdb.ID(i),
+							ID:     platform.ID(i),
 							Name:   fmt.Sprintf("user%d", i),
 							Status: "active",
 						})
@@ -241,12 +288,7 @@ func TestUser(t *testing.T) {
 	}
 	for _, testScenario := range st {
 		t.Run(testScenario.name, func(t *testing.T) {
-			s, closeS, err := NewTestInmemStore(t)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer closeS()
-
+			s := itesting.NewTestInmemStore(t)
 			ts := tenant.NewStore(s)
 
 			// setup

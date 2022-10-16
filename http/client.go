@@ -42,7 +42,6 @@ type Service struct {
 	Token              string
 	InsecureSkipVerify bool
 
-	*BackupService
 	*TaskService
 	*NotificationRuleService
 	*VariableService
@@ -51,7 +50,7 @@ type Service struct {
 	*NotificationEndpointService
 	*TelegrafService
 	*LabelService
-	DBRPMappingServiceV2 *dbrp.Client
+	DBRPMappingService *dbrp.Client
 }
 
 // NewService returns a service that is an HTTP client to a remote.
@@ -68,12 +67,8 @@ type Service struct {
 // in the behavior of the returned service.
 func NewService(httpClient *httpc.Client, addr, token string) (*Service, error) {
 	return &Service{
-		Addr:  addr,
-		Token: token,
-		BackupService: &BackupService{
-			Addr:  addr,
-			Token: token,
-		},
+		Addr:                    addr,
+		Token:                   token,
 		TaskService:             &TaskService{Client: httpClient},
 		NotificationRuleService: &NotificationRuleService{Client: httpClient},
 		VariableService:         &VariableService{Client: httpClient},
@@ -85,7 +80,7 @@ func NewService(httpClient *httpc.Client, addr, token string) (*Service, error) 
 		NotificationEndpointService: &NotificationEndpointService{Client: httpClient},
 		TelegrafService:             NewTelegrafService(httpClient),
 		LabelService:                &LabelService{Client: httpClient},
-		DBRPMappingServiceV2:        dbrp.NewClient(httpClient),
+		DBRPMappingService:          dbrp.NewClient(httpClient),
 	}, nil
 }
 

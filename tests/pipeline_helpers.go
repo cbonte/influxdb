@@ -6,6 +6,7 @@ import (
 
 	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/cmd/influxd/launcher"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"go.uber.org/zap"
 )
 
@@ -15,9 +16,9 @@ import (
 type Pipeline struct {
 	Launcher *launcher.TestLauncher
 
-	DefaultOrgID    influxdb.ID
-	DefaultBucketID influxdb.ID
-	DefaultUserID   influxdb.ID
+	DefaultOrgID    platform.ID
+	DefaultBucketID platform.ID
+	DefaultUserID   platform.ID
 }
 
 // NewDefaultPipeline creates a Pipeline with default
@@ -55,12 +56,12 @@ func NewPipeline(tb testing.TB, opts ...launcher.OptSetter) *Pipeline {
 
 	// setup default operator
 	res := p.Launcher.OnBoardOrFail(tb, &influxdb.OnboardingRequest{
-		User:            DefaultUsername,
-		Password:        DefaultPassword,
-		Org:             DefaultOrgName,
-		Bucket:          DefaultBucketName,
-		RetentionPeriod: 0, // infinite retention period
-		Token:           OperToken,
+		User:                   DefaultUsername,
+		Password:               DefaultPassword,
+		Org:                    DefaultOrgName,
+		Bucket:                 DefaultBucketName,
+		RetentionPeriodSeconds: influxdb.InfiniteRetention,
+		Token:                  OperToken,
 	})
 
 	p.DefaultOrgID = res.Org.ID
@@ -102,7 +103,7 @@ func (p *Pipeline) MustNewAdminClient() *Client {
 }
 
 // MustNewClient returns a client that will direct requests to Launcher.
-func (p *Pipeline) MustNewClient(org, bucket influxdb.ID, token string) *Client {
+func (p *Pipeline) MustNewClient(org, bucket platform.ID, token string) *Client {
 	config := ClientConfig{
 		UserID:             p.DefaultUserID,
 		OrgID:              org,
@@ -110,7 +111,7 @@ func (p *Pipeline) MustNewClient(org, bucket influxdb.ID, token string) *Client 
 		DocumentsNamespace: DefaultDocumentsNamespace,
 		Token:              token,
 	}
-	svc, err := NewClient(p.Launcher.URL(), config)
+	svc, err := NewClient(p.Launcher.URL().String(), config)
 	if err != nil {
 		panic(err)
 	}
@@ -118,7 +119,7 @@ func (p *Pipeline) MustNewClient(org, bucket influxdb.ID, token string) *Client 
 }
 
 // NewBrowserClient returns a client with a cookie session that will direct requests to Launcher.
-func (p *Pipeline) NewBrowserClient(org, bucket influxdb.ID, session *influxdb.Session) (*Client, error) {
+func (p *Pipeline) NewBrowserClient(org, bucket platform.ID, session *influxdb.Session) (*Client, error) {
 	config := ClientConfig{
 		UserID:             p.DefaultUserID,
 		OrgID:              org,
@@ -126,14 +127,14 @@ func (p *Pipeline) NewBrowserClient(org, bucket influxdb.ID, session *influxdb.S
 		DocumentsNamespace: DefaultDocumentsNamespace,
 		Session:            session,
 	}
-	return NewClient(p.Launcher.URL(), config)
+	return NewClient(p.Launcher.URL().String(), config)
 }
 
 // BrowserFor will create a user, session, and browser client.
 // The generated browser points to the given org and bucket.
 //
 // The user and session are inserted directly into the backing store.
-func (p *Pipeline) BrowserFor(org, bucket influxdb.ID, username string) (*Client, influxdb.ID, error) {
+func (p *Pipeline) BrowserFor(org, bucket platform.ID, username string) (*Client, platform.ID, error) {
 	ctx := context.Background()
 	user := &influxdb.User{
 		Name: username,

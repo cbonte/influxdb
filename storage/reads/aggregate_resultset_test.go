@@ -22,7 +22,7 @@ func TestNewWindowAggregateResultSet_Tags(t *testing.T) {
 	request := datatypes.ReadWindowAggregateRequest{
 		Aggregate: []*datatypes.Aggregate{
 			{
-				Type: datatypes.AggregateTypeMean,
+				Type: datatypes.Aggregate_AggregateTypeMean,
 			},
 		},
 	}
@@ -88,12 +88,12 @@ func (i *mockStringArrayCursor) Next() *cursors.StringArray {
 }
 
 type mockCursorIterator struct {
-	newCursorFn func() cursors.Cursor
+	newCursorFn func(req *cursors.CursorRequest) cursors.Cursor
 	statsFn     func() cursors.CursorStats
 }
 
 func (i *mockCursorIterator) Next(ctx context.Context, req *cursors.CursorRequest) (cursors.Cursor, error) {
-	return i.newCursorFn(), nil
+	return i.newCursorFn(req), nil
 }
 func (i *mockCursorIterator) Stats() cursors.CursorStats {
 	if i.statsFn == nil {
@@ -114,7 +114,7 @@ func newMockReadCursor(keys ...string) mockReadCursor {
 		rows[i].Tags = rows[i].SeriesTags.Clone()
 		var itrs cursors.CursorIterators
 		cur := &mockCursorIterator{
-			newCursorFn: func() cursors.Cursor {
+			newCursorFn: func(req *cursors.CursorRequest) cursors.Cursor {
 				return &mockIntegerArrayCursor{}
 			},
 			statsFn: func() cursors.CursorStats {
@@ -148,7 +148,7 @@ func TestNewWindowAggregateResultSet_Stats(t *testing.T) {
 	request := datatypes.ReadWindowAggregateRequest{
 		Aggregate: []*datatypes.Aggregate{
 			{
-				Type: datatypes.AggregateTypeMean,
+				Type: datatypes.Aggregate_AggregateTypeMean,
 			},
 		},
 	}
@@ -183,7 +183,7 @@ func TestNewWindowAggregateResultSet_Mean(t *testing.T) {
 
 	request := datatypes.ReadWindowAggregateRequest{
 		Aggregate: []*datatypes.Aggregate{
-			&datatypes.Aggregate{Type: datatypes.AggregateTypeMean},
+			&datatypes.Aggregate{Type: datatypes.Aggregate_AggregateTypeMean},
 		},
 		WindowEvery: 10,
 	}
@@ -219,7 +219,7 @@ func TestNewWindowAggregateResultSet_Months(t *testing.T) {
 	)
 	request := datatypes.ReadWindowAggregateRequest{
 		Aggregate: []*datatypes.Aggregate{
-			&datatypes.Aggregate{Type: datatypes.AggregateTypeMean},
+			&datatypes.Aggregate{Type: datatypes.Aggregate_AggregateTypeMean},
 		},
 		Window: &datatypes.Window{
 			Every: &datatypes.Duration{
@@ -260,7 +260,7 @@ func TestNewWindowAggregateResultSet_UnsupportedTyped(t *testing.T) {
 	)
 	for i := range newCursor.rows[0].Query {
 		newCursor.rows[0].Query[i] = &mockCursorIterator{
-			newCursorFn: func() cursors.Cursor {
+			newCursorFn: func(req *cursors.CursorRequest) cursors.Cursor {
 				return &mockStringArrayCursor{}
 			},
 		}
@@ -268,7 +268,7 @@ func TestNewWindowAggregateResultSet_UnsupportedTyped(t *testing.T) {
 
 	request := datatypes.ReadWindowAggregateRequest{
 		Aggregate: []*datatypes.Aggregate{
-			{Type: datatypes.AggregateTypeMean},
+			{Type: datatypes.Aggregate_AggregateTypeMean},
 		},
 		WindowEvery: 10,
 	}
@@ -287,5 +287,49 @@ func TestNewWindowAggregateResultSet_UnsupportedTyped(t *testing.T) {
 	}
 	if want, got := "unsupported input type for mean aggregate: string", err.Error(); want != got {
 		t.Fatalf("unexpected error:\n\t- %q\n\t+ %q", want, got)
+	}
+}
+
+func TestNewWindowAggregateResultSet_TimeRange(t *testing.T) {
+	newCursor := newMockReadCursor(
+		"clicks click=1 1",
+	)
+	for i := range newCursor.rows[0].Query {
+		newCursor.rows[0].Query[i] = &mockCursorIterator{
+			newCursorFn: func(req *cursors.CursorRequest) cursors.Cursor {
+				if want, got := int64(0), req.StartTime; want != got {
+					t.Errorf("unexpected start time -want/+got:\n\t- %d\n\t+ %d", want, got)
+				}
+				if want, got := int64(29), req.EndTime; want != got {
+					t.Errorf("unexpected end time -want/+got:\n\t- %d\n\t+ %d", want, got)
+				}
+				return &mockIntegerArrayCursor{}
+			},
+		}
+	}
+
+	ctx := context.Background()
+	req := datatypes.ReadWindowAggregateRequest{
+		Range: &datatypes.TimestampRange{
+			Start: 0,
+			End:   30,
+		},
+		Aggregate: []*datatypes.Aggregate{
+			{
+				Type: datatypes.Aggregate_AggregateTypeCount,
+			},
+		},
+		Window: &datatypes.Window{
+			Every: &datatypes.Duration{Nsecs: int64(time.Minute)},
+		},
+	}
+
+	resultSet, err := reads.NewWindowAggregateResultSet(ctx, &req, &newCursor)
+	if err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	}
+
+	if !resultSet.Next() {
+		t.Fatal("expected result")
 	}
 }

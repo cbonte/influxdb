@@ -3,7 +3,6 @@ package tsm1_test
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -12,14 +11,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/influxdata/influxdb/v2/logger"
+	"github.com/influxdata/influxdb/v2/tsdb"
 	"github.com/influxdata/influxdb/v2/tsdb/engine/tsm1"
+	"go.uber.org/zap/zaptest"
 )
 
 func TestFileStore_Read(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -56,7 +56,7 @@ func TestFileStore_Read(t *testing.T) {
 func TestFileStore_SeekToAsc_FromStart(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -95,7 +95,7 @@ func TestFileStore_SeekToAsc_FromStart(t *testing.T) {
 func TestFileStore_SeekToAsc_Duplicate(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -168,7 +168,7 @@ func TestFileStore_SeekToAsc_Duplicate(t *testing.T) {
 func TestFileStore_SeekToAsc_BeforeStart(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -209,7 +209,7 @@ func TestFileStore_SeekToAsc_BeforeStart(t *testing.T) {
 func TestFileStore_SeekToAsc_BeforeStart_OverlapFloat(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -276,7 +276,7 @@ func TestFileStore_SeekToAsc_BeforeStart_OverlapFloat(t *testing.T) {
 func TestFileStore_SeekToAsc_BeforeStart_OverlapInteger(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -342,7 +342,7 @@ func TestFileStore_SeekToAsc_BeforeStart_OverlapInteger(t *testing.T) {
 func TestFileStore_SeekToAsc_BeforeStart_OverlapUnsigned(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -408,7 +408,7 @@ func TestFileStore_SeekToAsc_BeforeStart_OverlapUnsigned(t *testing.T) {
 func TestFileStore_SeekToAsc_BeforeStart_OverlapBoolean(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -474,7 +474,7 @@ func TestFileStore_SeekToAsc_BeforeStart_OverlapBoolean(t *testing.T) {
 func TestFileStore_SeekToAsc_BeforeStart_OverlapString(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -540,7 +540,7 @@ func TestFileStore_SeekToAsc_BeforeStart_OverlapString(t *testing.T) {
 func TestFileStore_SeekToAsc_OverlapMinFloat(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -620,7 +620,7 @@ func TestFileStore_SeekToAsc_OverlapMinFloat(t *testing.T) {
 func TestFileStore_SeekToAsc_OverlapMinInteger(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -699,7 +699,7 @@ func TestFileStore_SeekToAsc_OverlapMinInteger(t *testing.T) {
 func TestFileStore_SeekToAsc_OverlapMinUnsigned(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -778,7 +778,7 @@ func TestFileStore_SeekToAsc_OverlapMinUnsigned(t *testing.T) {
 func TestFileStore_SeekToAsc_OverlapMinBoolean(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -857,7 +857,7 @@ func TestFileStore_SeekToAsc_OverlapMinBoolean(t *testing.T) {
 func TestFileStore_SeekToAsc_OverlapMinString(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -934,7 +934,7 @@ func TestFileStore_SeekToAsc_OverlapMinString(t *testing.T) {
 func TestFileStore_SeekToAsc_Middle(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -992,7 +992,7 @@ func TestFileStore_SeekToAsc_Middle(t *testing.T) {
 func TestFileStore_SeekToAsc_End(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1030,7 +1030,7 @@ func TestFileStore_SeekToAsc_End(t *testing.T) {
 func TestFileStore_SeekToDesc_FromStart(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1068,7 +1068,7 @@ func TestFileStore_SeekToDesc_FromStart(t *testing.T) {
 func TestFileStore_SeekToDesc_Duplicate(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1127,7 +1127,7 @@ func TestFileStore_SeekToDesc_Duplicate(t *testing.T) {
 func TestFileStore_SeekToDesc_OverlapMaxFloat(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1192,7 +1192,7 @@ func TestFileStore_SeekToDesc_OverlapMaxFloat(t *testing.T) {
 func TestFileStore_SeekToDesc_OverlapMaxInteger(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1254,7 +1254,7 @@ func TestFileStore_SeekToDesc_OverlapMaxInteger(t *testing.T) {
 func TestFileStore_SeekToDesc_OverlapMaxUnsigned(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1317,7 +1317,7 @@ func TestFileStore_SeekToDesc_OverlapMaxUnsigned(t *testing.T) {
 func TestFileStore_SeekToDesc_OverlapMaxBoolean(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1380,7 +1380,7 @@ func TestFileStore_SeekToDesc_OverlapMaxBoolean(t *testing.T) {
 func TestFileStore_SeekToDesc_OverlapMaxString(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1443,7 +1443,7 @@ func TestFileStore_SeekToDesc_OverlapMaxString(t *testing.T) {
 func TestFileStore_SeekToDesc_AfterEnd(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1481,7 +1481,7 @@ func TestFileStore_SeekToDesc_AfterEnd(t *testing.T) {
 func TestFileStore_SeekToDesc_AfterEnd_OverlapFloat(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 4 files
 	data := []keyValues{
@@ -1578,7 +1578,7 @@ func TestFileStore_SeekToDesc_AfterEnd_OverlapFloat(t *testing.T) {
 func TestFileStore_SeekToDesc_AfterEnd_OverlapInteger(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1655,7 +1655,7 @@ func TestFileStore_SeekToDesc_AfterEnd_OverlapInteger(t *testing.T) {
 func TestFileStore_SeekToDesc_AfterEnd_OverlapUnsigned(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1732,7 +1732,7 @@ func TestFileStore_SeekToDesc_AfterEnd_OverlapUnsigned(t *testing.T) {
 func TestFileStore_SeekToDesc_AfterEnd_OverlapBoolean(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1829,7 +1829,7 @@ func TestFileStore_SeekToDesc_AfterEnd_OverlapBoolean(t *testing.T) {
 func TestFileStore_SeekToDesc_AfterEnd_OverlapString(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -1926,7 +1926,7 @@ func TestFileStore_SeekToDesc_AfterEnd_OverlapString(t *testing.T) {
 func TestFileStore_SeekToDesc_Middle(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -2003,7 +2003,7 @@ func TestFileStore_SeekToDesc_Middle(t *testing.T) {
 func TestFileStore_SeekToDesc_End(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -2041,7 +2041,7 @@ func TestFileStore_SeekToDesc_End(t *testing.T) {
 func TestKeyCursor_TombstoneRange(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -2085,7 +2085,7 @@ func TestKeyCursor_TombstoneRange(t *testing.T) {
 func TestKeyCursor_TombstoneRange_PartialFirst(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -2128,7 +2128,7 @@ func TestKeyCursor_TombstoneRange_PartialFirst(t *testing.T) {
 func TestKeyCursor_TombstoneRange_PartialFloat(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -2172,7 +2172,7 @@ func TestKeyCursor_TombstoneRange_PartialFloat(t *testing.T) {
 func TestKeyCursor_TombstoneRange_PartialInteger(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -2216,7 +2216,7 @@ func TestKeyCursor_TombstoneRange_PartialInteger(t *testing.T) {
 func TestKeyCursor_TombstoneRange_PartialUnsigned(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -2260,7 +2260,7 @@ func TestKeyCursor_TombstoneRange_PartialUnsigned(t *testing.T) {
 func TestKeyCursor_TombstoneRange_PartialString(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -2304,7 +2304,7 @@ func TestKeyCursor_TombstoneRange_PartialString(t *testing.T) {
 func TestKeyCursor_TombstoneRange_PartialBoolean(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -2361,8 +2361,8 @@ func TestFileStore_Open(t *testing.T) {
 		fatal(t, "creating test files", err)
 	}
 
-	fs := tsm1.NewFileStore(dir)
-	if err := fs.Open(); err != nil {
+	fs := newTestFileStore(dir)
+	if err := fs.Open(context.Background()); err != nil {
 		fatal(t, "opening file store", err)
 	}
 	defer fs.Close()
@@ -2392,8 +2392,8 @@ func TestFileStore_Remove(t *testing.T) {
 		fatal(t, "creating test files", err)
 	}
 
-	fs := tsm1.NewFileStore(dir)
-	if err := fs.Open(); err != nil {
+	fs := newTestFileStore(dir)
+	if err := fs.Open(context.Background()); err != nil {
 		fatal(t, "opening file store", err)
 	}
 	defer fs.Close()
@@ -2437,8 +2437,8 @@ func TestFileStore_Replace(t *testing.T) {
 	replacement := fmt.Sprintf("%s.%s", files[2], tsm1.TmpTSMFileExtension)
 	os.Rename(files[2], replacement)
 
-	fs := tsm1.NewFileStore(dir)
-	if err := fs.Open(); err != nil {
+	fs := newTestFileStore(dir)
+	if err := fs.Open(context.Background()); err != nil {
 		fatal(t, "opening file store", err)
 	}
 	defer fs.Close()
@@ -2524,8 +2524,8 @@ func TestFileStore_Open_Deleted(t *testing.T) {
 		fatal(t, "creating test files", err)
 	}
 
-	fs := tsm1.NewFileStore(dir)
-	if err := fs.Open(); err != nil {
+	fs := newTestFileStore(dir)
+	if err := fs.Open(context.Background()); err != nil {
 		fatal(t, "opening file store", err)
 	}
 	defer fs.Close()
@@ -2538,8 +2538,8 @@ func TestFileStore_Open_Deleted(t *testing.T) {
 		fatal(t, "deleting", err)
 	}
 
-	fs2 := tsm1.NewFileStore(dir)
-	if err := fs2.Open(); err != nil {
+	fs2 := newTestFileStore(dir)
+	if err := fs2.Open(context.Background()); err != nil {
 		fatal(t, "opening file store", err)
 	}
 	defer fs2.Close()
@@ -2552,7 +2552,7 @@ func TestFileStore_Open_Deleted(t *testing.T) {
 func TestFileStore_Delete(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -2586,7 +2586,7 @@ func TestFileStore_Delete(t *testing.T) {
 func TestFileStore_Apply(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -2608,7 +2608,7 @@ func TestFileStore_Apply(t *testing.T) {
 	}
 
 	var n int64
-	if err := fs.Apply(func(r tsm1.TSMFile) error {
+	if err := fs.Apply(context.Background(), func(r tsm1.TSMFile) error {
 		atomic.AddInt64(&n, 1)
 		return nil
 	}); err != nil {
@@ -2636,8 +2636,8 @@ func TestFileStore_Stats(t *testing.T) {
 		fatal(t, "creating test files", err)
 	}
 
-	fs := tsm1.NewFileStore(dir)
-	if err := fs.Open(); err != nil {
+	fs := newTestFileStore(dir)
+	if err := fs.Open(context.Background()); err != nil {
 		fatal(t, "opening file store", err)
 	}
 	defer fs.Close()
@@ -2698,7 +2698,7 @@ func TestFileStore_Stats(t *testing.T) {
 func TestFileStore_CreateSnapshot(t *testing.T) {
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 
 	// Setup 3 files
 	data := []keyValues{
@@ -2725,7 +2725,7 @@ func TestFileStore_CreateSnapshot(t *testing.T) {
 	}
 	t.Logf("temp file for hard links: %q", s)
 
-	tfs, e := ioutil.ReadDir(s)
+	tfs, e := os.ReadDir(s)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -2739,14 +2739,18 @@ func TestFileStore_CreateSnapshot(t *testing.T) {
 		if _, err := os.Stat(p); os.IsNotExist(err) {
 			t.Fatalf("unable to find file %q", p)
 		}
-		for _, tf := range f.TombstoneFiles() {
-			p := filepath.Join(s, filepath.Base(tf.Path))
+		if ts := f.TombstoneStats(); ts.TombstoneExists {
+			p := filepath.Join(s, filepath.Base(ts.Path))
 			t.Logf("checking for existence of hard link %q", p)
 			if _, err := os.Stat(p); os.IsNotExist(err) {
 				t.Fatalf("unable to find file %q", p)
 			}
 		}
 	}
+}
+
+func newTestFileStore(dir string) *tsm1.FileStore {
+	return tsm1.NewFileStore(dir, tsdb.EngineTags{})
 }
 
 type mockObserver struct {
@@ -2789,7 +2793,7 @@ func TestFileStore_Observer(t *testing.T) {
 
 	dir := MustTempDir()
 	defer os.RemoveAll(dir)
-	fs := tsm1.NewFileStore(dir)
+	fs := newTestFileStore(dir)
 	fs.WithObserver(m)
 
 	// Setup 3 files
@@ -2927,7 +2931,7 @@ type keyValues struct {
 }
 
 func MustTempDir() string {
-	dir, err := ioutil.TempDir("", "tsm1-test")
+	dir, err := os.MkdirTemp("", "tsm1-test")
 	if err != nil {
 		panic(fmt.Sprintf("failed to create temp dir: %v", err))
 	}
@@ -2935,7 +2939,7 @@ func MustTempDir() string {
 }
 
 func MustTempFile(dir string) *os.File {
-	f, err := ioutil.TempFile(dir, "tsm1test")
+	f, err := os.CreateTemp(dir, "tsm1test")
 	if err != nil {
 		panic(fmt.Sprintf("failed to create temp file: %v", err))
 	}
@@ -2963,12 +2967,10 @@ func BenchmarkFileStore_Stats(b *testing.B) {
 		b.Fatalf("creating benchmark files %v", err)
 	}
 
-	fs := tsm1.NewFileStore(dir)
-	if testing.Verbose() {
-		fs.WithLogger(logger.New(os.Stderr))
-	}
+	fs := newTestFileStore(dir)
+	fs.WithLogger(zaptest.NewLogger(b))
 
-	if err := fs.Open(); err != nil {
+	if err := fs.Open(context.Background()); err != nil {
 		b.Fatalf("opening file store %v", err)
 	}
 	defer fs.Close()

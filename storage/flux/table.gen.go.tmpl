@@ -5,17 +5,19 @@ import (
 	"math"
 	"sync"
 
-	"github.com/apache/arrow/go/arrow/array"
 	"github.com/influxdata/flux"
+	"github.com/influxdata/flux/array"
 	"github.com/influxdata/flux/arrow"
 	"github.com/influxdata/flux/execute"
+	"github.com/influxdata/flux/interval"
 	"github.com/influxdata/flux/memory"
 	"github.com/influxdata/flux/values"
-	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/models"
 	"github.com/influxdata/influxdb/v2/storage/reads/datatypes"
 	storage "github.com/influxdata/influxdb/v2/storage/reads"
 	"github.com/influxdata/influxdb/v2/tsdb/cursors"
+	"github.com/influxdata/influxdb/v2/storage/reads/datatypes"
 )
 {{range .}}
 //
@@ -26,7 +28,7 @@ type {{.name}}Table struct {
 	table
 	mu     sync.Mutex
 	cur    cursors.{{.Name}}ArrayCursor
-	alloc  *memory.Allocator
+	alloc  memory.Allocator
 }
 
 func new{{.Name}}Table(
@@ -38,7 +40,7 @@ func new{{.Name}}Table(
 	tags models.Tags,
 	defs [][]byte,
 	cache *tagsCache,
-	alloc *memory.Allocator,
+	alloc memory.Allocator,
 ) *{{.name}}Table {
 	t := &{{.name}}Table{
 		table: newTable(done, bounds, key, cols, defs, cache, alloc),
@@ -100,11 +102,12 @@ func (t *{{.name}}Table) advance() bool {
 type {{.name}}WindowTable struct {
 	{{.name}}Table
 	arr         *cursors.{{.Name}}Array
-	nextTS      int64
+	windowBounds interval.Bounds
 	idxInArr    int
 	createEmpty bool
 	timeColumn  string
-	window execute.Window
+	isAggregate bool
+	window interval.Window
 	{{if eq .Name "Integer"}}fillValue *{{.Type}}{{end}}
 }
 
@@ -112,16 +115,17 @@ func new{{.Name}}WindowTable(
 	done chan struct{},
 	cur cursors.{{.Name}}ArrayCursor,
 	bounds execute.Bounds,
-	window execute.Window,
+	window interval.Window,
 	createEmpty bool,
 	timeColumn string,
+	isAggregate bool,
 	{{if eq .Name "Integer"}}fillValue *{{.Type}},{{end}}
 	key flux.GroupKey,
 	cols []flux.ColMeta,
 	tags models.Tags,
 	defs [][]byte,
 	cache *tagsCache,
-	alloc *memory.Allocator,
+	alloc memory.Allocator,
 ) *{{.name}}WindowTable {
 	t := &{{.name}}WindowTable{
 		{{.name}}Table: {{.name}}Table{
@@ -131,11 +135,12 @@ func new{{.Name}}WindowTable(
 		window: window,
 		createEmpty: createEmpty,
 		timeColumn:  timeColumn,
+		isAggregate: isAggregate,
 		{{if eq .Name "Integer"}}fillValue: fillValue,{{end}}
 	}
 	if t.createEmpty {
 		start := int64(bounds.Start)
-		t.nextTS = int64(window.GetEarliestBounds(values.Time(start)).Stop)
+		t.windowBounds = window.GetLatestBounds(values.Time(start))
 	}
 	t.readTags(tags)
 	t.init(t.advance)
@@ -149,15 +154,14 @@ func (t *{{.name}}WindowTable) Do(f func(flux.ColReader) error) error {
 
 // createNextBufferTimes will read the timestamps from the array
 // cursor and construct the values for the next buffer.
-func (t *{{.name}}WindowTable) createNextBufferTimes() (start, stop *array.Int64, ok bool) {
+func (t *{{.name}}WindowTable) createNextBufferTimes() (start, stop *array.Int, ok bool) {
 	startB := arrow.NewIntBuilder(t.alloc)
 	stopB := arrow.NewIntBuilder(t.alloc)
 
 	if t.createEmpty {
 		// There are no more windows when the start time is greater
 		// than or equal to the stop time.
-		subEvery := values.MakeDuration(t.window.Every.Nanoseconds(), t.window.Every.Months(), t.window.Every.IsPositive())
-		if startT := int64(values.Time(t.nextTS).Add(subEvery)); startT >= int64(t.bounds.Stop) {
+		if startT := int64(t.windowBounds.Start()); startT >= int64(t.bounds.Stop) {
 			return nil, nil, false
 		}
 
@@ -165,16 +169,16 @@ func (t *{{.name}}WindowTable) createNextBufferTimes() (start, stop *array.Int64
 		// TODO(jsternberg): Calculate the exact size with max points as the maximum.
 		startB.Resize(storage.MaxPointsPerBlock)
 		stopB.Resize(storage.MaxPointsPerBlock)
-		for ; ; t.nextTS = int64(values.Time(t.nextTS).Add(t.window.Every)) {
-			startT, stopT := t.getWindowBoundsFor(t.nextTS)
+		for ; ; t.windowBounds = t.window.NextBounds(t.windowBounds) {
+			startT, stopT := t.getWindowBoundsFor(t.windowBounds)
 			if startT >= int64(t.bounds.Stop) {
 				break
 			}
 			startB.Append(startT)
 			stopB.Append(stopT)
 		}
-		start = startB.NewInt64Array()
-		stop = stopB.NewInt64Array()
+		start = startB.NewIntArray()
+		stop = stopB.NewIntArray()
 		return start, stop, true
 	}
 
@@ -188,34 +192,35 @@ func (t *{{.name}}WindowTable) createNextBufferTimes() (start, stop *array.Int64
 	startB.Resize(len(t.arr.Timestamps))
 	stopB.Resize(len(t.arr.Timestamps))
 	for _, stopT := range t.arr.Timestamps {
-		startT, stopT := t.getWindowBoundsFor(stopT)
+		bounds := t.window.PrevBounds(t.window.GetLatestBounds(values.Time(stopT)))
+		startT, stopT := t.getWindowBoundsFor(bounds)
 		startB.Append(startT)
 		stopB.Append(stopT)
 	}
-	start = startB.NewInt64Array()
-	stop = stopB.NewInt64Array()
+	start = startB.NewIntArray()
+	stop = stopB.NewIntArray()
 	return start, stop, true
 }
 
-func (t *{{.name}}WindowTable) getWindowBoundsFor(ts int64) (startT, stopT int64) {
-	subEvery := values.MakeDuration(t.window.Every.Nanoseconds(), t.window.Every.Months(), t.window.Every.IsPositive())
-	startT, stopT = int64(values.Time(ts).Add(subEvery)), ts
-	if startT < int64(t.bounds.Start) {
-		startT = int64(t.bounds.Start)
+func (t *{{.name}}WindowTable) getWindowBoundsFor(bounds interval.Bounds) (int64, int64) {
+	beg := int64(bounds.Start())
+	end := int64(bounds.Stop())
+	if beg < int64(t.bounds.Start) {
+		beg = int64(t.bounds.Start)
 	}
-	if stopT > int64(t.bounds.Stop) {
-		stopT = int64(t.bounds.Stop)
+	if end > int64(t.bounds.Stop) {
+		end = int64(t.bounds.Stop)
 	}
-	return startT, stopT
+	return beg, end
 }
 
 // nextAt will retrieve the next value that can be used with
 // the given stop timestamp. If no values can be used with the timestamp,
 // it will return the default value and false.
-func (t *{{.name}}WindowTable) nextAt(ts int64) (v {{.Type}}, ok bool) {
+func (t *{{.name}}WindowTable) nextAt(stop int64) (v {{.Type}}, ok bool) {
 	if !t.nextBuffer() {
 		return
-	} else if !t.isInWindow(ts, t.arr.Timestamps[t.idxInArr]) {
+	} else if !t.isInWindow(stop, t.arr.Timestamps[t.idxInArr]) {
 		return
 	}
 	v, ok = t.arr.Values[t.idxInArr], true
@@ -223,24 +228,26 @@ func (t *{{.name}}WindowTable) nextAt(ts int64) (v {{.Type}}, ok bool) {
 	return v, ok
 }
 
-// isInWindow will check if the given time at stop can be used within
-// the window stop time for ts. The ts may be a truncated stop time
-// because of a restricted boundary while stop will be the true
-// stop time returned by storage.
-func (t *{{.name}}WindowTable) isInWindow(ts int64, stop int64) bool {
-	// This method checks if the stop time is a valid stop time for
-	// that interval. This calculation is different from the calculation
-	// of the window itself. For example, for a 10 second window that
-	// starts at 20 seconds, we would include points between [20, 30).
-	// The stop time for this interval would be 30, but because the stop
-	// time can be truncated, valid stop times range from anywhere between
-	// (20, 30]. The storage engine will always produce 30 as the end time
-	// but we may have truncated the stop time because of the boundary
-	// and this is why we are checking for this range instead of checking
-	// if the two values are equal.
-	subEvery := values.MakeDuration(t.window.Every.Nanoseconds(), t.window.Every.Months(), t.window.Every.IsPositive())
-	start := int64(values.Time(stop).Add(subEvery))
-	return start < ts && ts <= stop
+// isInWindow will check if the given time may be used within the window
+// denoted by the stop timestamp. The stop may be a truncated stop time
+// because of a restricted boundary.
+//
+// When used with an aggregate, ts will be the true stop time returned
+// by storage. When used with an aggregate, it will be the real time
+// for the point.
+func (t *{{.name}}WindowTable) isInWindow(stop int64, ts int64) bool {
+	// Retrieve the boundary associated with this stop time.
+	// This will be the boundary for the previous nanosecond.
+	bounds := t.window.GetLatestBounds(values.Time(stop - 1))
+	start, stop := int64(bounds.Start()), int64(bounds.Stop())
+
+	// For an aggregate, the timestamp will be the stop time of the boundary.
+	if t.isAggregate {
+	    return start < ts && ts <= stop
+	}
+
+	// For a selector, the timestamp should be within the boundary.
+	return start <= ts && ts < stop
 }
 
 // nextBuffer will ensure the array cursor is filled
@@ -316,21 +323,21 @@ func (t *{{.name}}WindowTable) advance() bool {
 type {{.name}}WindowSelectorTable struct {
 	{{.name}}Table
 	timeColumn  string
-	window execute.Window
+	window interval.Window
 }
 
 func new{{.Name}}WindowSelectorTable(
 	done chan struct{},
 	cur cursors.{{.Name}}ArrayCursor,
 	bounds execute.Bounds,
-	window execute.Window, 
+	window interval.Window, 
 	timeColumn string,
 	key flux.GroupKey,
 	cols []flux.ColMeta,
 	tags models.Tags,
 	defs [][]byte,
 	cache *tagsCache,
-	alloc *memory.Allocator,
+	alloc memory.Allocator,
 ) *{{.name}}WindowSelectorTable {
 	t := &{{.name}}WindowSelectorTable{
 		{{.name}}Table: {{.name}}Table{
@@ -375,36 +382,36 @@ func (t *{{.name}}WindowSelectorTable) advance() bool {
 	return true
 }
 
-func (t *{{.name}}WindowSelectorTable) startTimes(arr *cursors.{{.Name}}Array) *array.Int64 {
+func (t *{{.name}}WindowSelectorTable) startTimes(arr *cursors.{{.Name}}Array) *array.Int {
 	start := arrow.NewIntBuilder(t.alloc)
 	start.Resize(arr.Len())
 
 	rangeStart := int64(t.bounds.Start)
 
 	for _, v := range arr.Timestamps {
-		if windowStart := int64(t.window.GetEarliestBounds(values.Time(v)).Start); windowStart < rangeStart {
+		if windowStart := int64(t.window.GetLatestBounds(values.Time(v)).Start()); windowStart < rangeStart {
 			start.Append(rangeStart)
 		} else {
 			start.Append(windowStart)
 		}
 	}
-	return start.NewInt64Array()
+	return start.NewIntArray()
 }
 
-func (t *{{.name}}WindowSelectorTable) stopTimes(arr *cursors.{{.Name}}Array) *array.Int64 {
+func (t *{{.name}}WindowSelectorTable) stopTimes(arr *cursors.{{.Name}}Array) *array.Int {
 	stop := arrow.NewIntBuilder(t.alloc)
 	stop.Resize(arr.Len())
 
 	rangeStop := int64(t.bounds.Stop)
 
 	for _, v := range arr.Timestamps {
-		if windowStop := int64(t.window.GetEarliestBounds(values.Time(v)).Stop); windowStop > rangeStop {
+		if windowStop := int64(t.window.GetLatestBounds(values.Time(v)).Stop()); windowStop > rangeStop {
 			stop.Append(rangeStop)
 		} else {
 			stop.Append(windowStop)
 		}
 	}
-	return stop.NewInt64Array()
+	return stop.NewIntArray()
 }
 
 // This table implementation may contain empty windows
@@ -415,24 +422,23 @@ type {{.name}}EmptyWindowSelectorTable struct {
 	idx int
 	rangeStart  int64
 	rangeStop   int64
-	windowStart int64
-	windowStop  int64
+	windowBounds interval.Bounds
 	timeColumn  string
-	window execute.Window
+	window interval.Window
 }
 
 func new{{.Name}}EmptyWindowSelectorTable(
 	done chan struct{},
 	cur cursors.{{.Name}}ArrayCursor,
 	bounds execute.Bounds,
-	window execute.Window,
+	window interval.Window,
 	timeColumn string,
 	key flux.GroupKey,
 	cols []flux.ColMeta,
 	tags models.Tags,
 	defs [][]byte,
 	cache *tagsCache,
-	alloc *memory.Allocator,
+	alloc memory.Allocator,
 ) *{{.name}}EmptyWindowSelectorTable {
 	rangeStart := int64(bounds.Start)
 	rangeStop  := int64(bounds.Stop)
@@ -444,8 +450,7 @@ func new{{.Name}}EmptyWindowSelectorTable(
 		arr: cur.Next(),
 		rangeStart:  rangeStart,
 		rangeStop:   rangeStop,
-		windowStart: int64(window.GetEarliestBounds(values.Time(rangeStart)).Start),
-		windowStop: int64(window.GetEarliestBounds(values.Time(rangeStart)).Stop),
+		windowBounds: window.GetLatestBounds(values.Time(rangeStart)),
 		window: window,
 		timeColumn:  timeColumn,
 	}
@@ -492,17 +497,17 @@ func (t *{{.name}}EmptyWindowSelectorTable) advance() bool {
 	return true
 }
 
-func (t *{{.name}}EmptyWindowSelectorTable) startTimes(builder *array.{{.ArrowType}}Builder) *array.Int64 {
+func (t *{{.name}}EmptyWindowSelectorTable) startTimes(builder *array.{{.ArrowType}}Builder) *array.Int {
 	start := arrow.NewIntBuilder(t.alloc)
 	start.Resize(storage.MaxPointsPerBlock)
 
-	for t.windowStart < t.rangeStop {
+	for int64(t.windowBounds.Start()) < t.rangeStop {
 		// The first window should start at the
 		// beginning of the time range.
-		if t.windowStart < t.rangeStart {
+		if int64(t.windowBounds.Start()) < t.rangeStart {
 			start.Append(t.rangeStart)
 		} else {
-			start.Append(t.windowStart)
+			start.Append(int64(t.windowBounds.Start()))
 		}
 
 		var v int64
@@ -516,15 +521,14 @@ func (t *{{.name}}EmptyWindowSelectorTable) startTimes(builder *array.{{.ArrowTy
 		// If the current timestamp falls within the
 		// current window, append the value to the
 		// builder, otherwise append a null value.
-		if t.windowStart <= v && v < t.windowStop {
+		if int64(t.windowBounds.Start()) <= v && v < int64(t.windowBounds.Stop()) {
 			t.append(builder, t.arr.Values[t.idx])
 			t.idx++
 		} else {
 			builder.AppendNull()
 		}
 
-		t.windowStart = int64(values.Time(t.windowStart).Add(t.window.Every))
-		t.windowStop = int64(values.Time(t.windowStop).Add(t.window.Every))
+		t.windowBounds = t.window.NextBounds(t.windowBounds)
 
 		// If the current array is non-empty and has
 		// been read in its entirety, call Next().
@@ -537,20 +541,20 @@ func (t *{{.name}}EmptyWindowSelectorTable) startTimes(builder *array.{{.ArrowTy
 			break
 		}
 	}
-	return start.NewInt64Array()
+	return start.NewIntArray()
 }
 
-func (t *{{.name}}EmptyWindowSelectorTable) stopTimes(builder *array.{{.ArrowType}}Builder) *array.Int64 {
+func (t *{{.name}}EmptyWindowSelectorTable) stopTimes(builder *array.{{.ArrowType}}Builder) *array.Int {
 	stop := arrow.NewIntBuilder(t.alloc)
 	stop.Resize(storage.MaxPointsPerBlock)
 
-	for t.windowStart < t.rangeStop {
+	for int64(t.windowBounds.Start()) < t.rangeStop {
 		// The last window should stop at the end of
 		// the time range.
-		if t.windowStop > t.rangeStop {
+		if int64(t.windowBounds.Stop()) > t.rangeStop {
 			stop.Append(t.rangeStop)
 		} else {
-			stop.Append(t.windowStop)
+			stop.Append(int64(t.windowBounds.Stop()))
 		}
 
 		var v int64
@@ -564,15 +568,14 @@ func (t *{{.name}}EmptyWindowSelectorTable) stopTimes(builder *array.{{.ArrowTyp
 		// If the current timestamp falls within the
 		// current window, append the value to the
 		// builder, otherwise append a null value.
-		if t.windowStart <= v && v < t.windowStop {
+		if int64(t.windowBounds.Start()) <= v && v < int64(t.windowBounds.Stop()) {
 			t.append(builder, t.arr.Values[t.idx])
 			t.idx++
 		} else {
 			builder.AppendNull()
 		}
 
-		t.windowStart = int64(values.Time(t.windowStart).Add(t.window.Every))
-		t.windowStop = int64(values.Time(t.windowStop).Add(t.window.Every))
+		t.windowBounds = t.window.NextBounds(t.windowBounds)
 
 		// If the current array is non-empty and has
 		// been read in its entirety, call Next().
@@ -585,10 +588,10 @@ func (t *{{.name}}EmptyWindowSelectorTable) stopTimes(builder *array.{{.ArrowTyp
 			break
 		}
 	}
-	return stop.NewInt64Array()
+	return stop.NewIntArray()
 }
 
-func (t *{{.name}}EmptyWindowSelectorTable) startStopTimes(builder *array.{{.ArrowType}}Builder) (*array.Int64, *array.Int64, *array.Int64) {
+func (t *{{.name}}EmptyWindowSelectorTable) startStopTimes(builder *array.{{.ArrowType}}Builder) (*array.Int, *array.Int, *array.Int) {
 	start := arrow.NewIntBuilder(t.alloc)
 	start.Resize(storage.MaxPointsPerBlock)
 
@@ -598,22 +601,22 @@ func (t *{{.name}}EmptyWindowSelectorTable) startStopTimes(builder *array.{{.Arr
 	time := arrow.NewIntBuilder(t.alloc)
 	time.Resize(storage.MaxPointsPerBlock)
 
-	for t.windowStart < t.rangeStop {
+	for int64(t.windowBounds.Start()) < t.rangeStop {
 
 		// The first window should start at the
 		// beginning of the time range.
-		if t.windowStart < t.rangeStart {
+		if int64(t.windowBounds.Start()) < t.rangeStart {
 			start.Append(t.rangeStart)
 		} else {
-			start.Append(t.windowStart)
+			start.Append(int64(t.windowBounds.Start()))
 		}
 
 		// The last window should stop at the end of
 		// the time range.
-		if t.windowStop > t.rangeStop {
+		if int64(t.windowBounds.Stop()) > t.rangeStop {
 			stop.Append(t.rangeStop)
 		} else {
-			stop.Append(t.windowStop)
+			stop.Append(int64(t.windowBounds.Stop()))
 		}
 
 		var v int64
@@ -627,7 +630,7 @@ func (t *{{.name}}EmptyWindowSelectorTable) startStopTimes(builder *array.{{.Arr
 		// If the current timestamp falls within the
 		// current window, append the value to the
 		// builder, otherwise append a null value.
-		if t.windowStart <= v && v < t.windowStop {
+		if int64(t.windowBounds.Start()) <= v && v < int64(t.windowBounds.Stop()) {
 			time.Append(v)
 			t.append(builder, t.arr.Values[t.idx])
 			t.idx++
@@ -636,8 +639,7 @@ func (t *{{.name}}EmptyWindowSelectorTable) startStopTimes(builder *array.{{.Arr
 			builder.AppendNull()
 		}
 
-		t.windowStart = int64(values.Time(t.windowStart).Add(t.window.Every))
-		t.windowStop = int64(values.Time(t.windowStop).Add(t.window.Every))
+		t.windowBounds = t.window.NextBounds(t.windowBounds)
 
 		// If the current array is non-empty and has
 		// been read in its entirety, call Next().
@@ -650,7 +652,7 @@ func (t *{{.name}}EmptyWindowSelectorTable) startStopTimes(builder *array.{{.Arr
 			break
 		}
 	}
-	return start.NewInt64Array(), stop.NewInt64Array(), time.NewInt64Array()
+	return start.NewIntArray(), stop.NewIntArray(), time.NewIntArray()
 }
 
 // group table
@@ -672,7 +674,7 @@ func new{{.Name}}GroupTable(
 	tags models.Tags,
 	defs [][]byte,
 	cache *tagsCache,
-	alloc *memory.Allocator,
+	alloc memory.Allocator,
 ) *{{.name}}GroupTable {
 	t := &{{.name}}GroupTable{
 		table: newTable(done, bounds, key, cols, defs, cache, alloc),
@@ -738,20 +740,17 @@ func (t *{{.name}}GroupTable) advance() bool {
 		return true
 	}
 
-	aggregate, err := determine{{.Name}}AggregateMethod(t.gc.Aggregate().Type)
+	aggregate, err := make{{.Name}}AggregateAccumulator(t.gc.Aggregate().Type)
 	if err != nil {
 		t.err = err
 		return false
 	}
 
-	ts, v := aggregate(arr.Timestamps, arr.Values)
-	timestamps, values := []int64{ts}, []{{.Type}}{v}
+	aggregate.AccumulateFirst(arr.Timestamps, arr.Values, t.tags)
 	for {
 		arr = t.cur.Next()
 		if arr.Len() > 0 {
-			ts, v := aggregate(arr.Timestamps, arr.Values)
-			timestamps = append(timestamps, ts)
-			values = append(values, v)
+			aggregate.AccumulateMore(arr.Timestamps, arr.Values, t.tags)
 			continue
 		}
 
@@ -759,7 +758,7 @@ func (t *{{.name}}GroupTable) advance() bool {
 			break
 		}
 	}
-	timestamp, value := aggregate(timestamps, values)
+	timestamp, value, tags := aggregate.Result()
 
 	colReader := t.allocateBuffer(1)
 	if IsSelector(t.gc.Aggregate()) {
@@ -768,144 +767,233 @@ func (t *{{.name}}GroupTable) advance() bool {
 	} else {
 		colReader.cols[valueColIdxWithoutTime] = t.toArrowBuffer([]{{.Type}}{value})
 	}
-	t.appendTags(colReader)
+	t.appendTheseTags(colReader, tags)
 	t.appendBounds(colReader)
 	return true
 }
 
-type {{.name}}AggregateMethod func([]int64, []{{.Type}}) (int64, {{.Type}})
+type {{.Name}}AggregateAccumulator interface {
+	// AccumulateFirst receives an initial array of items to select from.
+	// It selects an item and stores the state. Afterwards, more data can
+	// be supplied with AccumulateMore and the results can be requested at
+	// any time. Without a call to AccumulateFirst the results are not
+	// defined.
+	AccumulateFirst(timestamps []int64, values []{{.Type}}, tags [][]byte)
 
-// determine{{.Name}}AggregateMethod returns the method for aggregating
-// returned points within the same group. The incoming points are the
-// ones returned for each series and the method returned here will
+	// AccumulateMore receives additional array elements to select from.
+	AccumulateMore(timestamps []int64, values []{{.Type}}, tags [][]byte)
+
+	// Result returns the item selected from the data received so far.
+	Result() (int64, {{.Type}}, [][]byte)
+}
+
+// The selector method takes a ( timestamp, value ) pair, a
+// ( []timestamp, []value ) pair, and a starting index. It applies the selector
+// to the single value and the array, starting at the supplied index. It
+// returns -1 if the single value is selected and a non-negative value if an
+// item from the array is selected.
+type {{.name}}SelectorMethod func(int64, {{.Type}}, []int64, []{{.Type}}, int) (int)
+
+// The selector accumulator tracks currently-selected item.
+type {{.name}}SelectorAccumulator struct {
+	selector {{.name}}SelectorMethod
+
+	ts int64
+	v {{.Type}}
+	tags [][]byte
+}
+
+func (a *{{.name}}SelectorAccumulator) AccumulateFirst(timestamps []int64, values []{{.Type}}, tags [][]byte) {
+	index := a.selector(timestamps[0], values[0], timestamps, values, 1)
+	if index < 0 {
+		a.ts = timestamps[0]
+		a.v = values[0]
+	} else {
+		a.ts = timestamps[index]
+		a.v = values[index]
+	}
+	a.tags = make([][]byte, len(tags))
+	copy(a.tags, tags)
+}
+
+func (a *{{.name}}SelectorAccumulator) AccumulateMore(timestamps []int64, values []{{.Type}}, tags [][]byte) {
+	index := a.selector(a.ts, a.v, timestamps, values, 0)
+	if index >= 0 {
+		a.ts = timestamps[index]
+		a.v = values[index]
+
+		if len(tags) > cap(a.tags) {
+			a.tags = make([][]byte, len(tags))
+		} else {
+			a.tags = a.tags[:len(tags)]
+		}
+		copy(a.tags, tags)
+	}
+}
+
+func (a *{{.name}}SelectorAccumulator) Result() (int64, {{.Type}}, [][]byte) {
+	return a.ts, a.v, a.tags
+}
+
+{{if and (ne .Name "Boolean") (ne .Name "String")}}
+
+// The aggregate method takes a value, an array of values, and a starting
+// index, applies an aggregate operation over the value and the array, starting
+// at the given index, and returns the result.
+type {{.name}}AggregateMethod func({{.Type}}, []{{.Type}}, int) ({{.Type}})
+
+type {{.name}}AggregateAccumulator struct {
+	aggregate {{.name}}AggregateMethod
+	accum {{.Type}}
+
+	// For pure aggregates it doesn't matter what we return for tags, but
+	// we need to satisfy the interface. We will just return the most
+	// recently seen tags.
+	tags [][]byte
+}
+
+func (a *{{.name}}AggregateAccumulator) AccumulateFirst(timestamps []int64, values []{{.Type}}, tags [][]byte) {
+	a.accum = a.aggregate(values[0], values, 1)
+	a.tags = tags
+}
+
+func (a *{{.name}}AggregateAccumulator) AccumulateMore(timestamps []int64, values []{{.Type}}, tags [][]byte) {
+	a.accum = a.aggregate(a.accum, values, 0)
+	a.tags = tags
+}
+
+// For group aggregates (non-selectors), the timestamp is always math.MaxInt64.
+// their final result does not contain _time, so this timestamp value can be
+// anything and it won't matter.
+func (a *{{.name}}AggregateAccumulator) Result() (int64, {{.Type}}, [][]byte) {
+	return math.MaxInt64, a.accum, a.tags
+}
+
+{{end}}
+
+// make{{.Name}}AggregateAccumulator returns the interface implementation for
+// aggregating returned points within the same group. The incoming points are
+// the ones returned for each series and the struct returned here will
 // aggregate the aggregates.
-func determine{{.Name}}AggregateMethod(agg datatypes.Aggregate_AggregateType) ({{.name}}AggregateMethod, error){
+func make{{.Name}}AggregateAccumulator(agg datatypes.Aggregate_AggregateType) ({{.Name}}AggregateAccumulator, error){
  	switch agg {
-	case datatypes.AggregateTypeFirst:
-		return aggregateFirstGroups{{.Name}}, nil
-	case datatypes.AggregateTypeLast:
-		return aggregateLastGroups{{.Name}}, nil
-	case datatypes.AggregateTypeCount:
+	case datatypes.Aggregate_AggregateTypeFirst:
+		return &{{.name}}SelectorAccumulator{selector: selectorFirstGroups{{.Name}}}, nil
+	case datatypes.Aggregate_AggregateTypeLast:
+		return &{{.name}}SelectorAccumulator{selector: selectorLastGroups{{.Name}}}, nil
+	case datatypes.Aggregate_AggregateTypeCount:
 		{{if eq .Name "Integer"}}
-		return aggregateCountGroups{{.Name}}, nil
+		return &{{.name}}AggregateAccumulator{aggregate: aggregateCountGroups{{.Name}}}, nil
 		{{else}}
-		return nil, &influxdb.Error {
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error {
+			Code: errors.EInvalid,
 			Msg: "unsupported for aggregate count: {{.Name}}",
 		}
 		{{end}}
-	case datatypes.AggregateTypeSum:
+	case datatypes.Aggregate_AggregateTypeSum:
 		{{if and (ne .Name "Boolean") (ne .Name "String")}}
-		return aggregateSumGroups{{.Name}}, nil
+		return &{{.name}}AggregateAccumulator{aggregate: aggregateSumGroups{{.Name}}}, nil
 		{{else}}
-		return nil, &influxdb.Error {
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error {
+			Code: errors.EInvalid,
 			Msg: "unsupported for aggregate sum: {{.Name}}",
 		}
 		{{end}}
-	case datatypes.AggregateTypeMin:
+	case datatypes.Aggregate_AggregateTypeMin:
 		{{if and (ne .Name "Boolean") (ne .Name "String")}}
-		return aggregateMinGroups{{.Name}}, nil
+		return &{{.name}}SelectorAccumulator{selector: selectorMinGroups{{.Name}}}, nil
 		{{else}}
-		return nil, &influxdb.Error {
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error {
+			Code: errors.EInvalid,
 			Msg: "unsupported for aggregate min: {{.Name}}",
 		}
 		{{end}}
-	case datatypes.AggregateTypeMax:
+	case datatypes.Aggregate_AggregateTypeMax:
 		{{if and (ne .Name "Boolean") (ne .Name "String")}}
-		return aggregateMaxGroups{{.Name}}, nil
+		return &{{.name}}SelectorAccumulator{selector: selectorMaxGroups{{.Name}}}, nil
 		{{else}}
-		return nil, &influxdb.Error {
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error {
+			Code: errors.EInvalid,
 			Msg: "unsupported for aggregate max: {{.Name}}",
 		}
 		{{end}}
 	default:
-		return nil, &influxdb.Error {
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error {
+			Code: errors.EInvalid,
 			Msg: fmt.Sprintf("unknown/unimplemented aggregate type: %v", agg),
 		}
 	}
 }
 
 {{if and (ne .Name "Boolean") (ne .Name "String")}}
-func aggregateMinGroups{{.Name}}(timestamps []int64, values []{{.Type}}) (int64, {{.Type}}) {
-	value := values[0]
-	timestamp := timestamps[0]
+func selectorMinGroups{{.Name}}(ts int64, v {{.Type}}, timestamps []int64, values []{{.Type}}, i int) (int) {
+	index := -1
 
-	for i := 1; i < len(values); i++ {
-		if value > values[i] {
-			value = values[i]
-			timestamp = timestamps[i]
+	for ; i < len(values); i++ {
+		if v > values[i] {
+			index = i
+			v = values[i]
 		}
 	}
 
-	return timestamp, value
+	return index
 }
 {{end}}
 
 {{if and (ne .Name "Boolean") (ne .Name "String")}}
-func aggregateMaxGroups{{.Name}}(timestamps []int64, values []{{.Type}}) (int64, {{.Type}}) {
-	value := values[0]
-	timestamp := timestamps[0]
+func selectorMaxGroups{{.Name}}(ts int64, v {{.Type}}, timestamps []int64, values []{{.Type}}, i int) (int) {
+	index := -1
 
-	for i := 1; i < len(values); i++ {
-		if value < values[i] {
-			value = values[i]
-			timestamp = timestamps[i]
+	for ; i < len(values); i++ {
+		if v < values[i] {
+			index = i
+			v = values[i]
 		}
 	}
 
-	return timestamp, value
+	return index
 }
 {{end}}
 
-// For group count and sum, the timestamp here is always math.MaxInt64.
-// their final result does not contain _time, so this timestamp value can be anything
-// and it won't matter.
 {{if eq .Name "Integer"}}
-func aggregateCountGroups{{.Name}}(timestamps []int64, values []{{.Type}}) (int64, {{.Type}}) {
-	return aggregateSumGroups{{.Name}}(timestamps, values)
+func aggregateCountGroups{{.Name}}(accum {{.Type}}, values []{{.Type}}, i int) ({{.Type}}) {
+	return aggregateSumGroups{{.Name}}(accum, values, i)
 }
 {{end}}
 
 {{if and (ne .Name "Boolean") (ne .Name "String")}}
-func aggregateSumGroups{{.Name}}(_ []int64, values []{{.Type}}) (int64, {{.Type}}) {
-	var sum {{.Type}}
-	for _, v := range values {
-		sum += v
+func aggregateSumGroups{{.Name}}(sum {{.Type}}, values []{{.Type}}, i int) ({{.Type}}) {
+	for ; i< len(values); i++ {
+		sum += values[i]
 	}
-	return math.MaxInt64, sum
+	return sum
 }
 {{end}}
 
-func aggregateFirstGroups{{.Name}}(timestamps []int64, values []{{.Type}}) (int64, {{.Type}}) {
-	value := values[0]
-	timestamp := timestamps[0]
+func selectorFirstGroups{{.Name}}(ts int64, v {{.Type}}, timestamps []int64, values []{{.Type}}, i int) (int) {
+	index := -1
 
-	for i := 1; i < len(values); i++ {
-		if timestamp > timestamps[i] {
-			value = values[i]
-			timestamp = timestamps[i]
+	for ; i < len(values); i++ {
+		if ts > timestamps[i] {
+			index = i
+			ts = timestamps[i]
 		}
 	}
 
-	return timestamp, value
+	return index
 }
 
-func aggregateLastGroups{{.Name}}(timestamps []int64, values []{{.Type}}) (int64, {{.Type}}) {
-	value := values[0]
-	timestamp := timestamps[0]
+func selectorLastGroups{{.Name}}(ts int64, v {{.Type}}, timestamps []int64, values []{{.Type}}, i int) (int) {
+	index := -1
 
-	for i := 1; i < len(values); i++ {
-		if timestamp < timestamps[i] {
-			value = values[i]
-			timestamp = timestamps[i]
+	for ; i < len(values); i++ {
+		if ts <= timestamps[i] {
+			index = i
+			ts = timestamps[i]
 		}
 	}
 
-	return timestamp, value
+	return index
 }
 
 func (t *{{.name}}GroupTable) advanceCursor() bool {
@@ -920,8 +1008,8 @@ func (t *{{.name}}GroupTable) advanceCursor() bool {
 		if typedCur, ok := cur.(cursors.{{.Name}}ArrayCursor); !ok {
 			// TODO(sgc): error or skip?
 			cur.Close()
-			t.err = &influxdb.Error {
-				Code: influxdb.EInvalid,
+			t.err = &errors.Error {
+				Code: errors.EInvalid,
 				Err: &GroupCursorError {
 					typ: "{{.name}}",
 					cursor: cur,

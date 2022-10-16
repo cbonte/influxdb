@@ -6,20 +6,23 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/influxdata/flux/ast"
 	"github.com/influxdata/flux/ast/edit"
+	fluxurl "github.com/influxdata/flux/dependencies/url"
 	"github.com/influxdata/flux/parser"
-	"github.com/influxdata/influxdb/v2"
+	errors2 "github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/pkg/jsonnet"
 	"github.com/influxdata/influxdb/v2/task/options"
 	"gopkg.in/yaml.v3"
@@ -104,8 +107,8 @@ func FromFile(filePath string) ReaderFn {
 	return func() (io.Reader, string, error) {
 		u, err := url.Parse(filePath)
 		if err != nil {
-			return nil, filePath, &influxdb.Error{
-				Code: influxdb.EInvalid,
+			return nil, filePath, &errors2.Error{
+				Code: errors2.EInvalid,
 				Msg:  "invalid filepath provided",
 				Err:  err,
 			}
@@ -115,7 +118,7 @@ func FromFile(filePath string) ReaderFn {
 		}
 
 		// not using os.Open to avoid having to deal with closing the file in here
-		b, err := ioutil.ReadFile(u.Path)
+		b, err := os.ReadFile(u.Path)
 		if err != nil {
 			return nil, filePath, err
 		}
@@ -145,15 +148,39 @@ func FromString(s string) ReaderFn {
 	}
 }
 
-var defaultHTTPClient = &http.Client{
-	Timeout: time.Minute,
+// NewDefaultHTTPClient creates a client with the specified flux IP validator.
+// This is copied from flux/dependencies/http/http.go
+func NewDefaultHTTPClient(urlValidator fluxurl.Validator) *http.Client {
+	// Control is called after DNS lookup, but before the network
+	// connection is initiated.
+	control := func(network, address string, c syscall.RawConn) error {
+		host, _, err := net.SplitHostPort(address)
+		if err != nil {
+			return err
+		}
+
+		ip := net.ParseIP(host)
+		return urlValidator.ValidateIP(ip)
+	}
+
+	dialer := &net.Dialer{
+		Timeout: time.Minute,
+		Control: control,
+		// DualStack is deprecated
+	}
+
+	return &http.Client{
+		Transport: &http.Transport{
+			DialContext: dialer.DialContext,
+		},
+	}
 }
 
 // FromHTTPRequest parses a pkg from the request body of a HTTP request. This is
 // very useful when using packages that are hosted..
-func FromHTTPRequest(addr string) ReaderFn {
+func FromHTTPRequest(addr string, client *http.Client) ReaderFn {
 	return func() (io.Reader, string, error) {
-		resp, err := defaultHTTPClient.Get(normalizeGithubURLToContent(addr))
+		resp, err := client.Get(normalizeGithubURLToContent(addr))
 		if err != nil {
 			return nil, addr, err
 		}
@@ -209,7 +236,16 @@ func parseJSON(r io.Reader, opts ...ValidateOptFn) (*Template, error) {
 }
 
 func parseJsonnet(r io.Reader, opts ...ValidateOptFn) (*Template, error) {
-	return parse(jsonnet.NewDecoder(r), opts...)
+	opt := &validateOpt{}
+	for _, o := range opts {
+		o(opt)
+	}
+	// For security, we'll default to disabling parsing jsonnet but allow callers to override the behavior via
+	// EnableJsonnet(). Enabling jsonnet might be useful for client code where parsing jsonnet could be acceptable.
+	if opt.enableJsonnet {
+		return parse(jsonnet.NewDecoder(r), opts...)
+	}
+	return nil, fmt.Errorf("%s: jsonnet", ErrInvalidEncoding)
 }
 
 func parseSource(r io.Reader, opts ...ValidateOptFn) (*Template, error) {
@@ -217,7 +253,7 @@ func parseSource(r io.Reader, opts ...ValidateOptFn) (*Template, error) {
 	if byter, ok := r.(interface{ Bytes() []byte }); ok {
 		b = byter.Bytes()
 	} else {
-		bb, err := ioutil.ReadAll(r)
+		bb, err := io.ReadAll(r)
 		if err != nil {
 			return nil, fmt.Errorf("failed to decode pkg source: %s", err)
 		}
@@ -536,13 +572,21 @@ func Combine(pkgs []*Template, validationOpts ...ValidateOptFn) (*Template, erro
 
 type (
 	validateOpt struct {
-		minResources bool
-		skipValidate bool
+		minResources  bool
+		skipValidate  bool
+		enableJsonnet bool
 	}
 
 	// ValidateOptFn provides a means to disable desired validation checks.
 	ValidateOptFn func(*validateOpt)
 )
+
+// Jsonnet parsing is disabled by default. EnableJsonnet turns it back on.
+func EnableJsonnet() ValidateOptFn {
+	return func(opt *validateOpt) {
+		opt.enableJsonnet = true
+	}
+}
 
 // ValidWithoutResources ignores the validation check for minimum number
 // of resources. This is useful for the service Create to ignore this and
@@ -812,6 +856,7 @@ func (p *Template) graphBuckets() *parseErr {
 		bkt := &bucket{
 			identity:    ident,
 			Description: o.Spec.stringShort(fieldDescription),
+			SchemaType:  o.Spec.stringShort(fieldBucketSchemaType),
 		}
 		if rules, ok := o.Spec[fieldBucketRetentionRules].(retentionRules); ok {
 			bkt.RetentionRules = rules
@@ -821,6 +866,21 @@ func (p *Template) graphBuckets() *parseErr {
 					Type:    r.stringShort(fieldType),
 					Seconds: r.intShort(fieldRetentionRulesEverySeconds),
 				})
+			}
+		}
+		if schemas, ok := o.Spec[fieldMeasurementSchemas].(measurementSchemas); ok {
+			bkt.MeasurementSchemas = schemas
+		} else {
+			for _, sr := range o.Spec.slcResource(fieldMeasurementSchemas) {
+				ms := measurementSchema{Name: sr.stringShort(fieldMeasurementSchemaName)}
+				for _, scr := range sr.slcResource(fieldMeasurementSchemaColumns) {
+					ms.Columns = append(ms.Columns, measurementColumn{
+						Name:     scr.stringShort(fieldMeasurementColumnName),
+						Type:     scr.stringShort(fieldMeasurementColumnType),
+						DataType: scr.stringShort(fieldMeasurementColumnDataType),
+					})
+				}
+				bkt.MeasurementSchemas = append(bkt.MeasurementSchemas, ms)
 			}
 		}
 		p.setRefs(bkt.name, bkt.displayName)
@@ -1434,6 +1494,28 @@ func (p *Template) setRefs(refs ...*references) {
 	}
 }
 
+func parseAxis(ra Resource, domain []float64) *axis {
+	return &axis{
+		Base:   ra.stringShort(fieldAxisBase),
+		Label:  ra.stringShort(fieldAxisLabel),
+		Name:   ra.Name(),
+		Prefix: ra.stringShort(fieldPrefix),
+		Scale:  ra.stringShort(fieldAxisScale),
+		Suffix: ra.stringShort(fieldSuffix),
+		Domain: domain,
+	}
+}
+
+func parseColor(rc Resource) *color {
+	return &color{
+		ID:    rc.stringShort("id"),
+		Name:  rc.Name(),
+		Type:  rc.stringShort(fieldType),
+		Hex:   rc.stringShort(fieldColorHex),
+		Value: flt64Ptr(rc.float64Short(fieldValue)),
+	}
+}
+
 func (p *Template) parseChart(dashMetaName string, chartIdx int, r Resource) (*chart, []validationErr) {
 	ck, err := r.chartKind()
 	if err != nil {
@@ -1474,21 +1556,34 @@ func (p *Template) parseChart(dashMetaName string, chartIdx int, r Resource) (*c
 		XPos:                       r.intShort(fieldChartXPos),
 		YPos:                       r.intShort(fieldChartYPos),
 		FillColumns:                r.slcStr(fieldChartFillColumns),
+		YLabelColumnSeparator:      r.stringShort(fieldChartYLabelColumnSeparator),
+		YLabelColumns:              r.slcStr(fieldChartYLabelColumns),
 		YSeriesColumns:             r.slcStr(fieldChartYSeriesColumns),
 		UpperColumn:                r.stringShort(fieldChartUpperColumn),
 		MainColumn:                 r.stringShort(fieldChartMainColumn),
 		LowerColumn:                r.stringShort(fieldChartLowerColumn),
 		LegendColorizeRows:         r.boolShort(fieldChartLegendColorizeRows),
+		LegendHide:                 r.boolShort(fieldChartLegendHide),
 		LegendOpacity:              r.float64Short(fieldChartLegendOpacity),
 		LegendOrientationThreshold: r.intShort(fieldChartLegendOrientationThreshold),
+		Zoom:                       r.float64Short(fieldChartGeoZoom),
+		Center:                     center{Lat: r.float64Short(fieldChartGeoCenterLat), Lon: r.float64Short(fieldChartGeoCenterLon)},
+		MapStyle:                   r.stringShort(fieldChartGeoMapStyle),
+		AllowPanAndZoom:            r.boolShort(fieldChartGeoAllowPanAndZoom),
+		DetectCoordinateFields:     r.boolShort(fieldChartGeoDetectCoordinateFields),
 	}
 
-	if presLeg, ok := r[fieldChartLegend].(legend); ok {
-		c.Legend = presLeg
+	if presStaticLeg, ok := r[fieldChartStaticLegend].(StaticLegend); ok {
+		c.StaticLegend = presStaticLeg
 	} else {
-		if leg, ok := ifaceToResource(r[fieldChartLegend]); ok {
-			c.Legend.Type = leg.stringShort(fieldType)
-			c.Legend.Orientation = leg.stringShort(fieldLegendOrientation)
+		if staticLeg, ok := ifaceToResource(r[fieldChartStaticLegend]); ok {
+			c.StaticLegend.ColorizeRows = staticLeg.boolShort(fieldChartStaticLegendColorizeRows)
+			c.StaticLegend.HeightRatio = staticLeg.float64Short(fieldChartStaticLegendHeightRatio)
+			c.StaticLegend.Show = staticLeg.boolShort(fieldChartStaticLegendShow)
+			c.StaticLegend.Opacity = staticLeg.float64Short(fieldChartStaticLegendOpacity)
+			c.StaticLegend.OrientationThreshold = staticLeg.intShort(fieldChartStaticLegendOrientationThreshold)
+			c.StaticLegend.ValueAxis = staticLeg.stringShort(fieldChartStaticLegendValueAxis)
+			c.StaticLegend.WidthRatio = staticLeg.float64Short(fieldChartStaticLegendWidthRatio)
 		}
 	}
 
@@ -1515,13 +1610,7 @@ func (p *Template) parseChart(dashMetaName string, chartIdx int, r Resource) (*c
 		c.Colors = presentColors
 	} else {
 		for _, rc := range r.slcResource(fieldChartColors) {
-			c.Colors = append(c.Colors, &color{
-				ID:    rc.stringShort("id"),
-				Name:  rc.Name(),
-				Type:  rc.stringShort(fieldType),
-				Hex:   rc.stringShort(fieldColorHex),
-				Value: flt64Ptr(rc.float64Short(fieldValue)),
-			})
+			c.Colors = append(c.Colors, parseColor(rc))
 		}
 	}
 
@@ -1544,15 +1633,49 @@ func (p *Template) parseChart(dashMetaName string, chartIdx int, r Resource) (*c
 				}
 			}
 
-			c.Axes = append(c.Axes, axis{
-				Base:   ra.stringShort(fieldAxisBase),
-				Label:  ra.stringShort(fieldAxisLabel),
-				Name:   ra.Name(),
-				Prefix: ra.stringShort(fieldPrefix),
-				Scale:  ra.stringShort(fieldAxisScale),
-				Suffix: ra.stringShort(fieldSuffix),
-				Domain: domain,
-			})
+			c.Axes = append(c.Axes, *parseAxis(ra, domain))
+		}
+	}
+
+	if presentGeoLayers, ok := r[fieldChartGeoLayers].(geoLayers); ok {
+		c.GeoLayers = presentGeoLayers
+	} else {
+		parseGeoAxis := func(r Resource, field string) *axis {
+			if axis, ok := r[field].(*axis); ok {
+				return axis
+			} else {
+				if leg, ok := ifaceToResource(r[field]); ok {
+					return parseAxis(leg, nil)
+				}
+			}
+			return nil
+		}
+
+		for _, rl := range r.slcResource(fieldChartGeoLayers) {
+			gl := geoLayer{
+				Type:               rl.stringShort(fieldChartGeoLayerType),
+				RadiusField:        rl.stringShort(fieldChartGeoLayerRadiusField),
+				ColorField:         rl.stringShort(fieldChartGeoLayerColorField),
+				IntensityField:     rl.stringShort(fieldChartGeoLayerIntensityField),
+				Radius:             int32(rl.intShort(fieldChartGeoLayerRadius)),
+				Blur:               int32(rl.intShort(fieldChartGeoLayerBlur)),
+				RadiusDimension:    parseGeoAxis(rl, fieldChartGeoLayerRadiusDimension),
+				ColorDimension:     parseGeoAxis(rl, fieldChartGeoLayerColorDimension),
+				IntensityDimension: parseGeoAxis(rl, fieldChartGeoLayerIntensityDimension),
+				InterpolateColors:  rl.boolShort(fieldChartGeoLayerInterpolateColors),
+				TrackWidth:         int32(rl.intShort(fieldChartGeoLayerTrackWidth)),
+				Speed:              int32(rl.intShort(fieldChartGeoLayerSpeed)),
+				RandomColors:       rl.boolShort(fieldChartGeoLayerRandomColors),
+				IsClustered:        rl.boolShort(fieldChartGeoLayerIsClustered),
+			}
+			if presentColors, ok := rl[fieldChartGeoLayerViewColors].(colors); ok {
+				gl.ViewColors = presentColors
+			} else {
+				for _, rc := range rl.slcResource(fieldChartGeoLayerViewColors) {
+					gl.ViewColors = append(gl.ViewColors, parseColor(rc))
+				}
+			}
+			c.GeoLayers = append(c.GeoLayers, &gl)
 		}
 	}
 
@@ -1607,7 +1730,7 @@ func (p *Template) parseChartQueries(dashMetaName string, chartIdx int, resource
 func (p *Template) parseQuery(prefix, source string, params, task []Resource) (query, error) {
 	files := parser.ParseSource(source).Files
 	if len(files) != 1 {
-		return query{}, influxErr(influxdb.EInvalid, "invalid query source")
+		return query{}, influxErr(errors2.EInvalid, "invalid query source")
 	}
 
 	q := query{
@@ -1699,7 +1822,7 @@ func (p *Template) parseQuery(prefix, source string, params, task []Resource) (q
 				case string:
 					tParams[field].defaultVal, err = time.ParseDuration(defDur)
 					if err != nil {
-						return query{}, influxErr(influxdb.EInvalid, err.Error())
+						return query{}, influxErr(errors2.EInvalid, err.Error())
 					}
 				case time.Duration:
 					tParams[field].defaultVal = defDur
@@ -2230,7 +2353,7 @@ func IsParseErr(err error) bool {
 		return true
 	}
 
-	iErr, ok := err.(*influxdb.Error)
+	iErr, ok := err.(*errors2.Error)
 	if !ok {
 		return false
 	}

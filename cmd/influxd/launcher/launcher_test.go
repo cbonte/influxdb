@@ -3,15 +3,17 @@ package launcher_test
 import (
 	"context"
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	nethttp "net/http"
 	"testing"
+	"time"
 
 	platform "github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/cmd/influxd/launcher"
 	_ "github.com/influxdata/influxdb/v2/fluxinit/static"
 	"github.com/influxdata/influxdb/v2/http"
 	"github.com/influxdata/influxdb/v2/tenant"
+	"github.com/stretchr/testify/assert"
 )
 
 // Default context.
@@ -22,7 +24,7 @@ func TestLauncher_Setup(t *testing.T) {
 	l.RunOrFail(t, ctx)
 	defer l.ShutdownOrFail(t, ctx)
 
-	client, err := http.NewHTTPClient(l.URL(), "", false)
+	client, err := http.NewHTTPClient(l.URL().String(), "", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,13 +48,13 @@ func TestLauncher_Setup(t *testing.T) {
 	}
 }
 
-// This is to mimic chronograf using cookies as sessions
+// This is to mimic the UI using cookies as sessions
 // rather than authorizations
 func TestLauncher_SetupWithUsers(t *testing.T) {
 	l := launcher.RunAndSetupNewLauncherOrFail(ctx, t)
 	defer l.ShutdownOrFail(t, ctx)
 
-	r, err := nethttp.NewRequest("POST", l.URL()+"/api/v2/signin", nil)
+	r, err := nethttp.NewRequest("POST", l.URL().String()+"/api/v2/signin", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +66,7 @@ func TestLauncher_SetupWithUsers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +96,7 @@ func TestLauncher_SetupWithUsers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +109,7 @@ func TestLauncher_SetupWithUsers(t *testing.T) {
 		t.Fatalf("unexpected status code: %d, body: %s, headers: %v", resp.StatusCode, body, resp.Header)
 	}
 
-	r, err = nethttp.NewRequest("GET", l.URL()+"/api/v2/users", nil)
+	r, err = nethttp.NewRequest("GET", l.URL().String()+"/api/v2/users", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,7 +120,7 @@ func TestLauncher_SetupWithUsers(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body, err = ioutil.ReadAll(resp.Body)
+	body, err = io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,4 +143,24 @@ func TestLauncher_SetupWithUsers(t *testing.T) {
 	if len(exp.Users) != 2 {
 		t.Fatalf("unexpected 2 users: %#+v", exp)
 	}
+}
+
+func TestLauncher_PingHeaders(t *testing.T) {
+	l := launcher.RunAndSetupNewLauncherOrFail(ctx, t)
+	defer l.ShutdownOrFail(t, ctx)
+
+	platform.SetBuildInfo("dev", "none", time.Now().UTC().Format(time.RFC3339))
+
+	r, err := nethttp.NewRequest("GET", l.URL().String()+"/ping", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	resp, err := nethttp.DefaultClient.Do(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, []string{"OSS"}, resp.Header.Values("X-Influxdb-Build"))
+	assert.Equal(t, []string{"dev"}, resp.Header.Values("X-Influxdb-Version"))
 }

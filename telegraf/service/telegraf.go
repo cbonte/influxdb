@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	influxdb "github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/kv"
 	"github.com/influxdata/influxdb/v2/snowflake"
 	"github.com/influxdata/influxdb/v2/telegraf"
@@ -13,30 +15,30 @@ import (
 
 var (
 	// ErrTelegrafNotFound is used when the telegraf configuration is not found.
-	ErrTelegrafNotFound = &influxdb.Error{
+	ErrTelegrafNotFound = &errors.Error{
 		Msg:  "telegraf configuration not found",
-		Code: influxdb.ENotFound,
+		Code: errors.ENotFound,
 	}
 
 	// ErrInvalidTelegrafID is used when the service was provided
 	// an invalid ID format.
-	ErrInvalidTelegrafID = &influxdb.Error{
-		Code: influxdb.EInvalid,
+	ErrInvalidTelegrafID = &errors.Error{
+		Code: errors.EInvalid,
 		Msg:  "provided telegraf configuration ID has invalid format",
 	}
 
 	// ErrInvalidTelegrafOrgID is the error message for a missing or invalid organization ID.
-	ErrInvalidTelegrafOrgID = &influxdb.Error{
-		Code: influxdb.EEmptyValue,
+	ErrInvalidTelegrafOrgID = &errors.Error{
+		Code: errors.EEmptyValue,
 		Msg:  "provided telegraf configuration organization ID is missing or invalid",
 	}
 )
 
 // UnavailableTelegrafServiceError is used if we aren't able to interact with the
 // store, it means the store is not available at the moment (e.g. network).
-func UnavailableTelegrafServiceError(err error) *influxdb.Error {
-	return &influxdb.Error{
-		Code: influxdb.EInternal,
+func UnavailableTelegrafServiceError(err error) *errors.Error {
+	return &errors.Error{
+		Code: errors.EInternal,
 		Msg:  fmt.Sprintf("Unable to connect to telegraf service. Please try again; Err: %v", err),
 		Op:   "kv/telegraf",
 	}
@@ -44,9 +46,9 @@ func UnavailableTelegrafServiceError(err error) *influxdb.Error {
 
 // InternalTelegrafServiceError is used when the error comes from an
 // internal system.
-func InternalTelegrafServiceError(err error) *influxdb.Error {
-	return &influxdb.Error{
-		Code: influxdb.EInternal,
+func InternalTelegrafServiceError(err error) *errors.Error {
+	return &errors.Error{
+		Code: errors.EInternal,
 		Msg:  fmt.Sprintf("Unknown internal telegraf data error; Err: %v", err),
 		Op:   "kv/telegraf",
 	}
@@ -54,18 +56,18 @@ func InternalTelegrafServiceError(err error) *influxdb.Error {
 
 // CorruptTelegrafError is used when the config cannot be unmarshalled from the
 // bytes stored in the kv.
-func CorruptTelegrafError(err error) *influxdb.Error {
-	return &influxdb.Error{
-		Code: influxdb.EInternal,
+func CorruptTelegrafError(err error) *errors.Error {
+	return &errors.Error{
+		Code: errors.EInternal,
 		Msg:  fmt.Sprintf("Unknown internal telegraf data error; Err: %v", err),
 		Op:   "kv/telegraf",
 	}
 }
 
 // ErrUnprocessableTelegraf is used when a telegraf is not able to be converted to JSON.
-func ErrUnprocessableTelegraf(err error) *influxdb.Error {
-	return &influxdb.Error{
-		Code: influxdb.EUnprocessableEntity,
+func ErrUnprocessableTelegraf(err error) *errors.Error {
+	return &errors.Error{
+		Code: errors.EUnprocessableEntity,
 		Msg:  fmt.Sprintf("unable to convert telegraf configuration into JSON; Err %v", err),
 	}
 }
@@ -83,7 +85,7 @@ type Service struct {
 
 	byOrganisationIndex *kv.Index
 
-	IDGenerator influxdb.IDGenerator
+	IDGenerator platform.IDGenerator
 }
 
 // New constructs and configures a new telegraf config service.
@@ -115,7 +117,7 @@ func (s *Service) telegrafPluginsBucket(tx kv.Tx) (kv.Bucket, error) {
 }
 
 // FindTelegrafConfigByID returns a single telegraf config by ID.
-func (s *Service) FindTelegrafConfigByID(ctx context.Context, id influxdb.ID) (*influxdb.TelegrafConfig, error) {
+func (s *Service) FindTelegrafConfigByID(ctx context.Context, id platform.ID) (*influxdb.TelegrafConfig, error) {
 	var (
 		tc  *influxdb.TelegrafConfig
 		err error
@@ -129,7 +131,7 @@ func (s *Service) FindTelegrafConfigByID(ctx context.Context, id influxdb.ID) (*
 	return tc, err
 }
 
-func (s *Service) findTelegrafConfigByID(ctx context.Context, tx kv.Tx, id influxdb.ID) (*influxdb.TelegrafConfig, error) {
+func (s *Service) findTelegrafConfigByID(ctx context.Context, tx kv.Tx, id platform.ID) (*influxdb.TelegrafConfig, error) {
 	encID, err := id.Encode()
 	if err != nil {
 		return nil, ErrInvalidTelegrafID
@@ -152,27 +154,19 @@ func (s *Service) findTelegrafConfigByID(ctx context.Context, tx kv.Tx, id influ
 }
 
 // FindTelegrafConfigs returns a list of telegraf configs that match filter and the total count of matching telegraf configs.
-// Additional options provide pagination & sorting.
+// FindOptions are ignored.
 func (s *Service) FindTelegrafConfigs(ctx context.Context, filter influxdb.TelegrafConfigFilter, opt ...influxdb.FindOptions) (tcs []*influxdb.TelegrafConfig, n int, err error) {
 	err = s.kv.View(ctx, func(tx kv.Tx) error {
-		tcs, n, err = s.findTelegrafConfigs(ctx, tx, filter, opt...)
+		tcs, n, err = s.findTelegrafConfigs(ctx, tx, filter)
 		return err
 	})
 	return tcs, n, err
 }
 
-func (s *Service) findTelegrafConfigs(ctx context.Context, tx kv.Tx, filter influxdb.TelegrafConfigFilter, opt ...influxdb.FindOptions) ([]*influxdb.TelegrafConfig, int, error) {
+func (s *Service) findTelegrafConfigs(ctx context.Context, tx kv.Tx, filter influxdb.TelegrafConfigFilter) ([]*influxdb.TelegrafConfig, int, error) {
 	var (
-		limit  = influxdb.DefaultPageSize
-		offset int
-		count  int
-		tcs    = make([]*influxdb.TelegrafConfig, 0)
+		tcs = make([]*influxdb.TelegrafConfig, 0)
 	)
-
-	if len(opt) > 0 {
-		limit = opt[0].GetLimit()
-		offset = opt[0].Offset
-	}
 
 	visit := func(k, v []byte) (bool, error) {
 		var tc influxdb.TelegrafConfig
@@ -180,15 +174,10 @@ func (s *Service) findTelegrafConfigs(ctx context.Context, tx kv.Tx, filter infl
 			return false, err
 		}
 
-		// skip until offset reached
-		if count >= offset {
-			tcs = append(tcs, &tc)
-		}
-
-		count++
+		tcs = append(tcs, &tc)
 
 		// stop cursing when limit is reached
-		return len(tcs) < limit, nil
+		return true, nil
 	}
 
 	if filter.OrgID == nil {
@@ -205,7 +194,7 @@ func (s *Service) findTelegrafConfigs(ctx context.Context, tx kv.Tx, filter infl
 		// REMOVE this cursor option if you do any
 		// other filtering
 
-		cursor, err := bucket.ForwardCursor(nil, kv.WithCursorLimit(offset+limit))
+		cursor, err := bucket.ForwardCursor(nil)
 		if err != nil {
 			return nil, 0, err
 		}
@@ -284,13 +273,13 @@ func (s *Service) putTelegrafConfigStats(encodedID []byte, tx kv.Tx, tc *influxd
 }
 
 // CreateTelegrafConfig creates a new telegraf config and sets b.ID with the new identifier.
-func (s *Service) CreateTelegrafConfig(ctx context.Context, tc *influxdb.TelegrafConfig, userID influxdb.ID) error {
+func (s *Service) CreateTelegrafConfig(ctx context.Context, tc *influxdb.TelegrafConfig, userID platform.ID) error {
 	return s.kv.Update(ctx, func(tx kv.Tx) error {
 		return s.createTelegrafConfig(ctx, tx, tc, userID)
 	})
 }
 
-func (s *Service) createTelegrafConfig(ctx context.Context, tx kv.Tx, tc *influxdb.TelegrafConfig, userID influxdb.ID) error {
+func (s *Service) createTelegrafConfig(ctx context.Context, tx kv.Tx, tc *influxdb.TelegrafConfig, userID platform.ID) error {
 	tc.ID = s.IDGenerator.ID()
 
 	return s.putTelegrafConfig(ctx, tx, tc)
@@ -298,7 +287,7 @@ func (s *Service) createTelegrafConfig(ctx context.Context, tx kv.Tx, tc *influx
 
 // UpdateTelegrafConfig updates a single telegraf config.
 // Returns the new telegraf config after update.
-func (s *Service) UpdateTelegrafConfig(ctx context.Context, id influxdb.ID, tc *influxdb.TelegrafConfig, userID influxdb.ID) (*influxdb.TelegrafConfig, error) {
+func (s *Service) UpdateTelegrafConfig(ctx context.Context, id platform.ID, tc *influxdb.TelegrafConfig, userID platform.ID) (*influxdb.TelegrafConfig, error) {
 	var err error
 	err = s.kv.Update(ctx, func(tx kv.Tx) error {
 		tc, err = s.updateTelegrafConfig(ctx, tx, id, tc, userID)
@@ -307,7 +296,7 @@ func (s *Service) UpdateTelegrafConfig(ctx context.Context, id influxdb.ID, tc *
 	return tc, err
 }
 
-func (s *Service) updateTelegrafConfig(ctx context.Context, tx kv.Tx, id influxdb.ID, tc *influxdb.TelegrafConfig, userID influxdb.ID) (*influxdb.TelegrafConfig, error) {
+func (s *Service) updateTelegrafConfig(ctx context.Context, tx kv.Tx, id platform.ID, tc *influxdb.TelegrafConfig, userID platform.ID) (*influxdb.TelegrafConfig, error) {
 	current, err := s.findTelegrafConfigByID(ctx, tx, id)
 	if err != nil {
 		return nil, err
@@ -321,13 +310,13 @@ func (s *Service) updateTelegrafConfig(ctx context.Context, tx kv.Tx, id influxd
 }
 
 // DeleteTelegrafConfig removes a telegraf config by ID.
-func (s *Service) DeleteTelegrafConfig(ctx context.Context, id influxdb.ID) error {
+func (s *Service) DeleteTelegrafConfig(ctx context.Context, id platform.ID) error {
 	return s.kv.Update(ctx, func(tx kv.Tx) error {
 		return s.deleteTelegrafConfig(ctx, tx, id)
 	})
 }
 
-func (s *Service) deleteTelegrafConfig(ctx context.Context, tx kv.Tx, id influxdb.ID) error {
+func (s *Service) deleteTelegrafConfig(ctx context.Context, tx kv.Tx, id platform.ID) error {
 	tc, err := s.findTelegrafConfigByID(ctx, tx, id)
 	if err != nil {
 		return err
@@ -375,8 +364,8 @@ func (s *Service) deleteTelegrafConfigStats(encodedID []byte, tx kv.Tx) error {
 	}
 
 	if err := bucket.Delete(encodedID); err != nil {
-		return &influxdb.Error{
-			Code: influxdb.EInternal,
+		return &errors.Error{
+			Code: errors.EInternal,
 			Msg:  fmt.Sprintf("Unable to connect to telegraf config stats service. Please try again; Err: %v", err),
 			Op:   "kv/telegraf",
 		}

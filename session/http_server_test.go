@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/mock"
 	"go.uber.org/zap/zaptest"
 )
@@ -38,16 +39,16 @@ func TestSessionHandler_handleSignin(t *testing.T) {
 				SessionService: &mock.SessionService{
 					CreateSessionFn: func(context.Context, string) (*influxdb.Session, error) {
 						return &influxdb.Session{
-							ID:        influxdb.ID(0),
+							ID:        platform.ID(0),
 							Key:       "abc123xyz",
 							CreatedAt: time.Date(2018, 9, 26, 0, 0, 0, 0, time.UTC),
 							ExpiresAt: time.Date(2030, 9, 26, 0, 0, 0, 0, time.UTC),
-							UserID:    influxdb.ID(1),
+							UserID:    platform.ID(1),
 						}, nil
 					},
 				},
 				PasswordsService: &mock.PasswordsService{
-					ComparePasswordFn: func(context.Context, influxdb.ID, string) error {
+					ComparePasswordFn: func(context.Context, platform.ID, string) error {
 						return nil
 					},
 				},
@@ -57,7 +58,7 @@ func TestSessionHandler_handleSignin(t *testing.T) {
 				password: "supersecret",
 			},
 			wants: wants{
-				cookie: "session=abc123xyz",
+				cookie: "influxdb-oss-session=abc123xyz; Path=/api/; Expires=Thu, 26 Sep 2030 00:00:00 GMT; SameSite=Strict",
 				code:   http.StatusNoContent,
 			},
 		},

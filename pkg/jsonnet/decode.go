@@ -3,12 +3,11 @@ package jsonnet
 import (
 	"encoding/json"
 	"io"
-	"io/ioutil"
 
 	"github.com/google/go-jsonnet"
 )
 
-// Decoder type can decoce a jsonnet stream into the given output.
+// Decoder type can decode a jsonnet stream into the given output.
 type Decoder struct {
 	r io.Reader
 }
@@ -20,13 +19,13 @@ func NewDecoder(r io.Reader) *Decoder {
 
 // Decode decodes the stream into the provide value.
 func (d *Decoder) Decode(v interface{}) error {
-	b, err := ioutil.ReadAll(d.r)
+	b, err := io.ReadAll(d.r)
 	if err != nil {
 		return err
 	}
 
 	vm := jsonnet.MakeVM()
-	jsonStr, err := vm.EvaluateSnippet("memory", string(b))
+	jsonStr, err := vm.EvaluateAnonymousSnippet("memory", string(b))
 	if err != nil {
 		return err
 	}

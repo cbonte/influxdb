@@ -84,6 +84,14 @@ func (s *KVStore) DeleteBucket(ctx context.Context, name []byte) error {
 	return nil
 }
 
+func (s *KVStore) RLock() {
+	s.mu.RLock()
+}
+
+func (s *KVStore) RUnlock() {
+	s.mu.RUnlock()
+}
+
 func (s *KVStore) Backup(ctx context.Context, w io.Writer) error {
 	panic("not implemented")
 }

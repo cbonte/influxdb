@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,6 +14,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/influxdata/influxdb/v2"
 	ihttp "github.com/influxdata/influxdb/v2/http"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/mock"
 	"github.com/influxdata/influxdb/v2/tenant"
 	itesting "github.com/influxdata/influxdb/v2/testing"
@@ -45,7 +46,7 @@ func TestUserResourceMappingService_GetMembersHandler(t *testing.T) {
 			name: "get members",
 			fields: fields{
 				userService: &mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{ID: id, Name: fmt.Sprintf("user%s", id), Status: influxdb.Active}, nil
 					},
 				},
@@ -108,7 +109,7 @@ func TestUserResourceMappingService_GetMembersHandler(t *testing.T) {
 			name: "get owners",
 			fields: fields{
 				userService: &mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{ID: id, Name: fmt.Sprintf("user%s", id), Status: influxdb.Active}, nil
 					},
 				},
@@ -202,7 +203,7 @@ func TestUserResourceMappingService_GetMembersHandler(t *testing.T) {
 				}
 				// check response
 				content := res.Header.Get("Content-Type")
-				body, _ := ioutil.ReadAll(res.Body)
+				body, _ := io.ReadAll(res.Body)
 				if res.StatusCode != tt.wants.statusCode {
 					t.Errorf("%q. GetMembersHandler() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
 				}
@@ -243,7 +244,7 @@ func TestUserResourceMappingService_PostMembersHandler(t *testing.T) {
 			name: "post members",
 			fields: fields{
 				userService: &mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{ID: id, Name: fmt.Sprintf("user%s", id), Status: influxdb.Active}, nil
 					},
 				},
@@ -281,7 +282,7 @@ func TestUserResourceMappingService_PostMembersHandler(t *testing.T) {
 			name: "post owners",
 			fields: fields{
 				userService: &mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{ID: id, Name: fmt.Sprintf("user%s", id), Status: influxdb.Active}, nil
 					},
 				},
@@ -354,7 +355,7 @@ func TestUserResourceMappingService_PostMembersHandler(t *testing.T) {
 					t.Fatal(err)
 				}
 				content := res.Header.Get("Content-Type")
-				body, _ := ioutil.ReadAll(res.Body)
+				body, _ := io.ReadAll(res.Body)
 
 				if res.StatusCode != tt.wants.statusCode {
 					t.Errorf("%q. PostMembersHandler() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -391,7 +392,7 @@ func TestUserResourceMappingService_Client(t *testing.T) {
 			name: "post members",
 			fields: fields{
 				userService: &mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{ID: id, Name: fmt.Sprintf("user%s", id), Status: influxdb.Active}, nil
 					},
 				},
@@ -419,7 +420,7 @@ func TestUserResourceMappingService_Client(t *testing.T) {
 			name: "post owners",
 			fields: fields{
 				userService: &mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{ID: id, Name: fmt.Sprintf("user%s", id), Status: influxdb.Active}, nil
 					},
 				},

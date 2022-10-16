@@ -6,10 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
-	"sort"
 	"time"
 
 	"github.com/NYTimes/gziphandler"
@@ -17,17 +15,20 @@ import (
 	"github.com/influxdata/flux/ast"
 	"github.com/influxdata/flux/csv"
 	"github.com/influxdata/flux/iocounter"
+	"github.com/influxdata/flux/lang"
 	"github.com/influxdata/httprouter"
 	"github.com/influxdata/influxdb/v2"
 	pcontext "github.com/influxdata/influxdb/v2/context"
 	"github.com/influxdata/influxdb/v2/http/metric"
 	"github.com/influxdata/influxdb/v2/kit/check"
 	"github.com/influxdata/influxdb/v2/kit/feature"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	errors2 "github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/kit/tracing"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"github.com/influxdata/influxdb/v2/logger"
 	"github.com/influxdata/influxdb/v2/query"
-	"github.com/influxdata/influxdb/v2/query/influxql"
+	"github.com/influxdata/influxdb/v2/query/fluxlang"
 	"github.com/pkg/errors"
 	prom "github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
@@ -41,28 +42,27 @@ const (
 // FluxBackend is all services and associated parameters required to construct
 // the FluxHandler.
 type FluxBackend struct {
-	influxdb.HTTPErrorHandler
+	errors2.HTTPErrorHandler
 	log                *zap.Logger
+	FluxLogEnabled     bool
 	QueryEventRecorder metric.EventRecorder
 
 	AlgoWProxy          FeatureProxyHandler
 	OrganizationService influxdb.OrganizationService
 	ProxyQueryService   query.ProxyQueryService
-	FluxLanguageService influxdb.FluxLanguageService
+	FluxLanguageService fluxlang.FluxLanguageService
 	Flagger             feature.Flagger
 }
 
 // NewFluxBackend returns a new instance of FluxBackend.
 func NewFluxBackend(log *zap.Logger, b *APIBackend) *FluxBackend {
 	return &FluxBackend{
-		HTTPErrorHandler:   b.HTTPErrorHandler,
-		log:                log,
-		QueryEventRecorder: b.QueryEventRecorder,
-		AlgoWProxy:         b.AlgoWProxy,
-		ProxyQueryService: routingQueryService{
-			InfluxQLService: b.InfluxQLService,
-			DefaultService:  b.FluxService,
-		},
+		HTTPErrorHandler:    b.HTTPErrorHandler,
+		log:                 log,
+		FluxLogEnabled:      b.FluxLogEnabled,
+		QueryEventRecorder:  b.QueryEventRecorder,
+		AlgoWProxy:          b.AlgoWProxy,
+		ProxyQueryService:   b.FluxService,
 		OrganizationService: b.OrganizationService,
 		FluxLanguageService: b.FluxLanguageService,
 		Flagger:             b.Flagger,
@@ -77,13 +77,14 @@ type HTTPDialect interface {
 // FluxHandler implements handling flux queries.
 type FluxHandler struct {
 	*httprouter.Router
-	influxdb.HTTPErrorHandler
-	log *zap.Logger
+	errors2.HTTPErrorHandler
+	log            *zap.Logger
+	FluxLogEnabled bool
 
 	Now                 func() time.Time
 	OrganizationService influxdb.OrganizationService
 	ProxyQueryService   query.ProxyQueryService
-	FluxLanguageService influxdb.FluxLanguageService
+	FluxLanguageService fluxlang.FluxLanguageService
 
 	EventRecorder metric.EventRecorder
 
@@ -102,6 +103,7 @@ func NewFluxHandler(log *zap.Logger, b *FluxBackend) *FluxHandler {
 		Now:              time.Now,
 		HTTPErrorHandler: b.HTTPErrorHandler,
 		log:              log,
+		FluxLogEnabled:   b.FluxLogEnabled,
 
 		ProxyQueryService:   b.ProxyQueryService,
 		OrganizationService: b.OrganizationService,
@@ -133,7 +135,7 @@ func (h *FluxHandler) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	// TODO(desa): I really don't like how we're recording the usage metrics here
 	// Ideally this will be moved when we solve https://github.com/influxdata/influxdb/issues/13403
-	var orgID influxdb.ID
+	var orgID platform.ID
 	var requestBytes int
 	sw := kithttp.NewStatusResponseWriter(w)
 	w = sw
@@ -149,8 +151,8 @@ func (h *FluxHandler) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	a, err := pcontext.GetAuthorizer(ctx)
 	if err != nil {
-		err := &influxdb.Error{
-			Code: influxdb.EUnauthorized,
+		err := &errors2.Error{
+			Code: errors2.EUnauthorized,
 			Msg:  "authorization is invalid or missing in the query request",
 			Op:   op,
 			Err:  err,
@@ -161,8 +163,8 @@ func (h *FluxHandler) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	req, n, err := decodeProxyQueryRequest(ctx, r, a, h.OrganizationService)
 	if err != nil && err != influxdb.ErrAuthorizerNotSupported {
-		err := &influxdb.Error{
-			Code: influxdb.EInvalid,
+		err := &errors2.Error{
+			Code: errors2.EInvalid,
 			Msg:  "failed to decode request body",
 			Op:   op,
 			Err:  err,
@@ -182,8 +184,8 @@ func (h *FluxHandler) handleQuery(w http.ResponseWriter, r *http.Request) {
 
 	hd, ok := req.Dialect.(HTTPDialect)
 	if !ok {
-		err := &influxdb.Error{
-			Code: influxdb.EInvalid,
+		err := &errors2.Error{
+			Code: errors2.EInvalid,
 			Msg:  fmt.Sprintf("unsupported dialect over HTTP: %T", req.Dialect),
 			Op:   op,
 		}
@@ -193,7 +195,8 @@ func (h *FluxHandler) handleQuery(w http.ResponseWriter, r *http.Request) {
 	hd.SetHeaders(w)
 
 	cw := iocounter.Writer{Writer: w}
-	if _, err := h.ProxyQueryService.Query(ctx, &cw, req); err != nil {
+	stats, err := h.ProxyQueryService.Query(ctx, &cw, req)
+	if err != nil {
 		if cw.Count() == 0 {
 			// Only record the error headers IFF nothing has been written to w.
 			h.HandleHTTPError(ctx, err, w)
@@ -205,6 +208,33 @@ func (h *FluxHandler) handleQuery(w http.ResponseWriter, r *http.Request) {
 			zap.Error(err),
 		)
 	}
+
+	// Detailed logging for flux queries if enabled
+	if h.FluxLogEnabled {
+		h.logFluxQuery(cw.Count(), stats, req.Request.Compiler, err)
+	}
+
+}
+
+func (h *FluxHandler) logFluxQuery(n int64, stats flux.Statistics, compiler flux.Compiler, err error) {
+	var q string
+	c, ok := compiler.(lang.FluxCompiler)
+	if !ok {
+		q = "unknown"
+	}
+	q = c.Query
+
+	h.log.Info("Executed Flux query",
+		zap.String("compiler_type", string(compiler.CompilerType())),
+		zap.Int64("response_size", n),
+		zap.String("query", q),
+		zap.Error(err),
+		zap.Duration("stat_total_duration", stats.TotalDuration),
+		zap.Duration("stat_compile_duration", stats.CompileDuration),
+		zap.Duration("stat_execute_duration", stats.ExecuteDuration),
+		zap.Int64("stat_max_allocated", stats.MaxAllocated),
+		zap.Int64("stat_total_allocated", stats.TotalAllocated),
+	)
 }
 
 type langRequest struct {
@@ -225,8 +255,8 @@ func (h *FluxHandler) postFluxAST(w http.ResponseWriter, r *http.Request) {
 
 	err := json.NewDecoder(r.Body).Decode(&request)
 	if err != nil {
-		h.HandleHTTPError(ctx, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		h.HandleHTTPError(ctx, &errors2.Error{
+			Code: errors2.EInvalid,
 			Msg:  "invalid json",
 			Err:  err,
 		}, w)
@@ -235,8 +265,8 @@ func (h *FluxHandler) postFluxAST(w http.ResponseWriter, r *http.Request) {
 
 	pkg, err := query.Parse(h.FluxLanguageService, request.Query)
 	if err != nil {
-		h.HandleHTTPError(ctx, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		h.HandleHTTPError(ctx, &errors2.Error{
+			Code: errors2.EInvalid,
 			Msg:  "invalid AST",
 			Err:  err,
 		}, w)
@@ -262,8 +292,8 @@ func (h *FluxHandler) postQueryAnalyze(w http.ResponseWriter, r *http.Request) {
 
 	var req QueryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		h.HandleHTTPError(ctx, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		h.HandleHTTPError(ctx, &errors2.Error{
+			Code: errors2.EInvalid,
 			Msg:  "invalid json",
 			Err:  err,
 		}, w)
@@ -517,14 +547,12 @@ func (s FluxQueryService) Check(ctx context.Context) check.Response {
 }
 
 // GetQueryResponse runs a flux query with common parameters and returns the response from the query service.
-func GetQueryResponse(qr *QueryRequest, addr, org, token string, headers ...string) (*http.Response, error) {
+func GetQueryResponse(qr *QueryRequest, addr *url.URL, org, token string, headers ...string) (*http.Response, error) {
 	if len(headers)%2 != 0 {
 		return nil, fmt.Errorf("headers must be key value pairs")
 	}
-	u, err := NewURL(addr, prefixQuery)
-	if err != nil {
-		return nil, err
-	}
+	u := *addr
+	u.Path = prefixQuery
 	params := url.Values{}
 	params.Set(Org, org)
 	u.RawQuery = params.Encode()
@@ -561,11 +589,11 @@ func GetQueryResponseBody(res *http.Response) ([]byte, error) {
 		return nil, err
 	}
 	defer res.Body.Close()
-	return ioutil.ReadAll(res.Body)
+	return io.ReadAll(res.Body)
 }
 
 // SimpleQuery runs a flux query with common parameters and returns CSV results.
-func SimpleQuery(addr, flux, org, token string, headers ...string) ([]byte, error) {
+func SimpleQuery(addr *url.URL, flux, org, token string, headers ...string) ([]byte, error) {
 	header := true
 	qr := &QueryRequest{
 		Type:  "flux",
@@ -623,39 +651,4 @@ func QueryHealthCheck(url string, insecureSkipVerify bool) check.Response {
 	}
 
 	return healthResponse
-}
-
-// routingQueryService routes queries to specific query services based on their compiler type.
-type routingQueryService struct {
-	// InfluxQLService handles queries with compiler type of "influxql"
-	InfluxQLService query.ProxyQueryService
-	// DefaultService handles all other queries
-	DefaultService query.ProxyQueryService
-}
-
-func (s routingQueryService) Check(ctx context.Context) check.Response {
-	// Produce combined check response
-	response := check.Response{
-		Name:   "internal-routingQueryService",
-		Status: check.StatusPass,
-	}
-	def := s.DefaultService.Check(ctx)
-	influxql := s.InfluxQLService.Check(ctx)
-	if def.Status == check.StatusFail {
-		response.Status = def.Status
-		response.Message = def.Message
-	} else if influxql.Status == check.StatusFail {
-		response.Status = influxql.Status
-		response.Message = influxql.Message
-	}
-	response.Checks = []check.Response{def, influxql}
-	sort.Sort(response.Checks)
-	return response
-}
-
-func (s routingQueryService) Query(ctx context.Context, w io.Writer, req *query.ProxyRequest) (flux.Statistics, error) {
-	if req.Request.Compiler.CompilerType() == influxql.CompilerType {
-		return s.InfluxQLService.Query(ctx, w, req)
-	}
-	return s.DefaultService.Query(ctx, w, req)
 }

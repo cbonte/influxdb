@@ -20,9 +20,6 @@ import (
 )
 
 var (
-	// ErrFormatNotFound is returned when no format can be determined from a path.
-	ErrFormatNotFound = errors.New("format not found")
-
 	// ErrUnknownEngineFormat is returned when the engine format is
 	// unknown. ErrUnknownEngineFormat is currently returned if a format
 	// other than tsm1 is encountered.
@@ -31,7 +28,7 @@ var (
 
 // Engine represents a swappable storage engine for the shard.
 type Engine interface {
-	Open() error
+	Open(ctx context.Context) error
 	Close() error
 	SetEnabled(enabled bool)
 	SetCompactionsEnabled(enabled bool)
@@ -41,7 +38,7 @@ type Engine interface {
 
 	LoadMetadataIndex(shardID uint64, index Index) error
 
-	CreateSnapshot() (string, error)
+	CreateSnapshot(skipCacheOk bool) (string, error)
 	Backup(w io.Writer, basePath string, since time.Time) error
 	Export(w io.Writer, basePath string, start time.Time, end time.Time) error
 	Restore(r io.Reader, basePath string) error
@@ -51,12 +48,12 @@ type Engine interface {
 	CreateIterator(ctx context.Context, measurement string, opt query.IteratorOptions) (query.Iterator, error)
 	CreateCursorIterator(ctx context.Context) (CursorIterator, error)
 	IteratorCost(measurement string, opt query.IteratorOptions) (query.IteratorCost, error)
-	WritePoints(points []models.Point) error
+	WritePoints(ctx context.Context, points []models.Point) error
 
 	CreateSeriesIfNotExists(key, name []byte, tags models.Tags) error
 	CreateSeriesListIfNotExists(keys, names [][]byte, tags []models.Tags) error
-	DeleteSeriesRange(itr SeriesIterator, min, max int64) error
-	DeleteSeriesRangeWithPredicate(itr SeriesIterator, predicate func(name []byte, tags models.Tags) (int64, int64, bool)) error
+	DeleteSeriesRange(ctx context.Context, itr SeriesIterator, min, max int64) error
+	DeleteSeriesRangeWithPredicate(ctx context.Context, itr SeriesIterator, predicate func(name []byte, tags models.Tags) (int64, int64, bool)) error
 
 	MeasurementsSketches() (estimator.Sketch, estimator.Sketch, error)
 	SeriesSketches() (estimator.Sketch, estimator.Sketch, error)
@@ -68,17 +65,15 @@ type Engine interface {
 	MeasurementFieldSet() *MeasurementFieldSet
 	MeasurementFields(measurement []byte) *MeasurementFields
 	ForEachMeasurementName(fn func(name []byte) error) error
-	DeleteMeasurement(name []byte) error
+	DeleteMeasurement(ctx context.Context, name []byte) error
 
 	HasTagKey(name, key []byte) (bool, error)
 	MeasurementTagKeysByExpr(name []byte, expr influxql.Expr) (map[string]struct{}, error)
 	TagKeyCardinality(name, key []byte) int
 
-	// Statistics will return statistics relevant to this engine.
-	Statistics(tags map[string]string) []models.Statistic
 	LastModified() time.Time
 	DiskSize() int64
-	IsIdle() bool
+	IsIdle() (bool, string)
 	Free() error
 
 	Reindex() error
@@ -183,13 +178,13 @@ type EngineOptions struct {
 	// nil will allow all combinations to pass.
 	ShardFilter func(database, rp string, id uint64) bool
 
-	Config         Config
-	SeriesIDSets   SeriesIDSets
-	FieldValidator FieldValidator
+	Config       Config
+	SeriesIDSets SeriesIDSets
 
 	OnNewEngine func(Engine)
 
 	FileStoreObserver FileStoreObserver
+	MetricsDisabled   bool
 }
 
 // NewEngineOptions constructs an EngineOptions object with safe default values.

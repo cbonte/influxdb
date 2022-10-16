@@ -6,6 +6,7 @@ import (
 
 	"github.com/influxdata/influxdb/v2"
 	icontext "github.com/influxdata/influxdb/v2/context"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 )
 
 func TestGetAuthorizer(t *testing.T) {
@@ -18,7 +19,7 @@ func TestGetAuthorizer(t *testing.T) {
 		t.Errorf("unexpected error while retrieving token: %v", err)
 	}
 
-	if want := influxdb.ID(1234); got.Identifier() != want {
+	if want := platform.ID(1234); got.Identifier() != want {
 		t.Errorf("GetToken() want %s, got %s", want, got)
 	}
 }
@@ -48,7 +49,7 @@ func TestGetUserID(t *testing.T) {
 		t.Errorf("unexpected error while retrieving user ID: %v", err)
 	}
 
-	if want := influxdb.ID(5678); got != want {
+	if want := platform.ID(5678); got != want {
 		t.Errorf("GetUserID() want %s, got %s", want, got)
 	}
 }

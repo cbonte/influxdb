@@ -4,21 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"net/url"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
 
+	"github.com/influxdata/influx-cli/v2/clients"
+	"github.com/influxdata/influx-cli/v2/pkg/stdio"
 	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/authorization"
 	"github.com/influxdata/influxdb/v2/bolt"
 	"github.com/influxdata/influxdb/v2/dbrp"
-	"github.com/influxdata/influxdb/v2/fluxinit"
 	"github.com/influxdata/influxdb/v2/internal/fs"
 	"github.com/influxdata/influxdb/v2/kit/cli"
 	"github.com/influxdata/influxdb/v2/kit/metric"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kit/prom"
 	"github.com/influxdata/influxdb/v2/kv"
 	"github.com/influxdata/influxdb/v2/kv/migration"
@@ -30,7 +31,6 @@ import (
 	"github.com/influxdata/influxdb/v2/v1/services/meta/filestore"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
-	"github.com/tcnksm/go-input"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
@@ -93,14 +93,16 @@ type optionsV2 struct {
 	enginePath     string
 	cqPath         string
 	configPath     string
-	userName       string
-	password       string
-	orgName        string
-	bucket         string
-	orgID          influxdb.ID
-	userID         influxdb.ID
-	token          string
-	retention      string
+	rmConflicts    bool
+
+	userName  string
+	password  string
+	orgName   string
+	bucket    string
+	orgID     platform.ID
+	userID    platform.ID
+	token     string
+	retention string
 }
 
 type options struct {
@@ -110,23 +112,25 @@ type options struct {
 	// flags for target InfluxDB
 	target optionsV2
 
-	// logging
-	logLevel zapcore.Level
-	logPath  string
-
 	force bool
 }
 
-func NewCommand(v *viper.Viper) *cobra.Command {
+type logOptions struct {
+	logLevel zapcore.Level
+	logPath  string
+}
+
+func NewCommand(ctx context.Context, v *viper.Viper) (*cobra.Command, error) {
 
 	// target flags
 	v2dir, err := fs.InfluxDir()
 	if err != nil {
-		panic("error fetching default InfluxDB 2.0 dir: " + err.Error())
+		return nil, fmt.Errorf("error fetching default InfluxDB 2.0 dir: %w", err)
 	}
 
 	// DEPRECATED in favor of log-level=debug, but left for backwards-compatibility
 	verbose := false
+	logOptions := &logOptions{}
 	options := &options{}
 
 	cmd := &cobra.Command{
@@ -146,7 +150,11 @@ func NewCommand(v *viper.Viper) *cobra.Command {
     Target 2.x database dir is specified by the --engine-path option. If changed, the bolt path should be changed as well.
 `,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runUpgradeE(cmd, options, verbose)
+			logger, err := buildLogger(logOptions, verbose)
+			if err != nil {
+				return err
+			}
+			return runUpgradeE(ctx, clients.CLI{StdIO: stdio.TerminalStdio}, options, logger)
 		},
 		Args: cobra.NoArgs,
 	}
@@ -193,42 +201,38 @@ func NewCommand(v *viper.Viper) *cobra.Command {
 			Desc:    "path for exported 1.x continuous queries",
 		},
 		{
-			DestP:    &options.target.userName,
-			Flag:     "username",
-			Default:  "",
-			Desc:     "primary username",
-			Short:    'u',
-			Required: true,
+			DestP:   &options.target.userName,
+			Flag:    "username",
+			Default: "",
+			Desc:    "primary username",
+			Short:   'u',
 		},
 		{
-			DestP:    &options.target.password,
-			Flag:     "password",
-			Default:  "",
-			Desc:     "password for username",
-			Short:    'p',
-			Required: true,
+			DestP:   &options.target.password,
+			Flag:    "password",
+			Default: "",
+			Desc:    "password for username",
+			Short:   'p',
 		},
 		{
-			DestP:    &options.target.orgName,
-			Flag:     "org",
-			Default:  "",
-			Desc:     "primary organization name",
-			Short:    'o',
-			Required: true,
+			DestP:   &options.target.orgName,
+			Flag:    "org",
+			Default: "",
+			Desc:    "primary organization name",
+			Short:   'o',
 		},
 		{
-			DestP:    &options.target.bucket,
-			Flag:     "bucket",
-			Default:  "",
-			Desc:     "primary bucket name",
-			Short:    'b',
-			Required: true,
+			DestP:   &options.target.bucket,
+			Flag:    "bucket",
+			Default: "",
+			Desc:    "primary bucket name",
+			Short:   'b',
 		},
 		{
 			DestP:   &options.target.retention,
 			Flag:    "retention",
 			Default: "",
-			Desc:    "optional: duration bucket will retain data. 0 is infinite. The default is 0.",
+			Desc:    "optional: duration bucket will retain data (i.e '1w' or '72h'). Default is infinite.",
 			Short:   'r',
 		},
 		{
@@ -250,13 +254,13 @@ func NewCommand(v *viper.Viper) *cobra.Command {
 			Desc:    "optional: Custom path where upgraded 2.x config should be written",
 		},
 		{
-			DestP:   &options.logLevel,
+			DestP:   &logOptions.logLevel,
 			Flag:    "log-level",
 			Default: zapcore.InfoLevel,
 			Desc:    "supported log levels are debug, info, warn and error",
 		},
 		{
-			DestP:   &options.logPath,
+			DestP:   &logOptions.logPath,
 			Flag:    "log-path",
 			Default: filepath.Join(homeOrAnyDir(), "upgrade.log"),
 			Desc:    "optional: custom log file path",
@@ -268,13 +272,21 @@ func NewCommand(v *viper.Viper) *cobra.Command {
 			Desc:    "skip the confirmation prompt",
 			Short:   'f',
 		},
+		{
+			DestP:   &options.target.rmConflicts,
+			Flag:    "overwrite-existing-v2",
+			Default: false,
+			Desc:    "if files are present at an output path, overwrite them instead of aborting the upgrade process",
+		},
 	}
 
-	cli.BindOptions(v, cmd, opts)
+	if err := cli.BindOptions(v, cmd, opts); err != nil {
+		return nil, err
+	}
 	// add sub commands
 	cmd.AddCommand(v1DumpMetaCommand)
 	cmd.AddCommand(v2DumpMetaCommand)
-	return cmd
+	return cmd, nil
 }
 
 type influxDBv1 struct {
@@ -288,7 +300,7 @@ type influxDBv2 struct {
 	kvStore     kv.SchemaStore
 	tenantStore *tenant.Store
 	ts          *tenant.Service
-	dbrpSvc     influxdb.DBRPMappingServiceV2
+	dbrpSvc     influxdb.DBRPMappingService
 	bucketSvc   influxdb.BucketService
 	onboardSvc  influxdb.OnboardingService
 	authSvc     *authv1.Service
@@ -312,34 +324,32 @@ func (i *influxDBv2) close() error {
 	return nil
 }
 
-var fluxInitialized bool
-
-func runUpgradeE(cmd *cobra.Command, options *options, verbose bool) error {
-	ctx := context.Background()
+func buildLogger(options *logOptions, verbose bool) (*zap.Logger, error) {
 	config := zap.NewProductionConfig()
 
 	config.Level = zap.NewAtomicLevelAt(options.logLevel)
 	if verbose {
 		config.Level.SetLevel(zap.DebugLevel)
 	}
+	logPath, err := options.zapSafeLogPath()
+	if err != nil {
+		return nil, err
+	}
 
-	config.OutputPaths = append(config.OutputPaths, options.logPath)
-	config.ErrorOutputPaths = append(config.ErrorOutputPaths, options.logPath)
+	config.OutputPaths = append(config.OutputPaths, logPath)
+	config.ErrorOutputPaths = append(config.ErrorOutputPaths, logPath)
 
 	log, err := config.Build()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if verbose {
 		log.Warn("--verbose is deprecated, use --log-level=debug instead")
 	}
+	return log, nil
+}
 
-	// This command is executed multiple times by test code. Initialization can happen only once.
-	if !fluxInitialized {
-		fluxinit.FluxInit()
-		fluxInitialized = true
-	}
-
+func runUpgradeE(ctx context.Context, cli clients.CLI, options *options, log *zap.Logger) error {
 	if options.source.configFile != "" && options.source.dbDir != "" {
 		return errors.New("only one of --v1-dir or --config-file may be specified")
 	}
@@ -357,8 +367,9 @@ func runUpgradeE(cmd *cobra.Command, options *options, verbose bool) error {
 		}
 	}
 
-	var v1Config *configV1
+	v1Config := &configV1{}
 	var genericV1ops *map[string]interface{}
+	var err error
 
 	if options.source.configFile != "" {
 		// If config is present, use it to set data paths.
@@ -369,16 +380,21 @@ func runUpgradeE(cmd *cobra.Command, options *options, verbose bool) error {
 		options.source.metaDir = v1Config.Meta.Dir
 		options.source.dataDir = v1Config.Data.Dir
 		options.source.walDir = v1Config.Data.WALDir
-		options.source.dbURL = v1Config.dbURL()
 	} else {
 		// Otherwise, assume a standard directory layout
 		// and the default port on localhost.
 		options.source.populateDirs()
-		options.source.dbURL = (&configV1{}).dbURL()
 	}
 
-	err = validatePaths(&options.source, &options.target)
-	if err != nil {
+	options.source.dbURL = v1Config.dbURL()
+	if err := options.source.validatePaths(); err != nil {
+		return err
+	}
+	checkV2paths := options.target.validatePaths
+	if options.target.rmConflicts {
+		checkV2paths = options.target.clearPaths
+	}
+	if err := checkV2paths(); err != nil {
 		return err
 	}
 
@@ -414,7 +430,7 @@ func runUpgradeE(cmd *cobra.Command, options *options, verbose bool) error {
 
 	defer func() {
 		if err := v2.close(); err != nil {
-			log.Error("Failed to close 2.0 services.", zap.Error(err))
+			log.Error("Failed to close 2.0 services", zap.Error(err))
 		}
 	}()
 
@@ -427,12 +443,7 @@ func runUpgradeE(cmd *cobra.Command, options *options, verbose bool) error {
 		return errors.New("InfluxDB has been already set up")
 	}
 
-	ui := &input.UI{
-		Writer: cmd.OutOrStdout(),
-		Reader: cmd.InOrStdin(),
-	}
-
-	req, err := onboardingRequest(ui, options)
+	req, err := onboardingRequest(cli, options)
 	if err != nil {
 		return err
 	}
@@ -450,16 +461,16 @@ func runUpgradeE(cmd *cobra.Command, options *options, verbose bool) error {
 		return err
 	}
 
-	db2BucketIds, err := upgradeDatabases(ctx, ui, v1, v2, options, or.Org.ID, log)
+	db2BucketIds, err := upgradeDatabases(ctx, cli, v1, v2, options, or.Org.ID, log)
 	if err != nil {
-		//remove all files
-		log.Info("Database upgrade error, removing data")
+		// remove all files
+		log.Error("Database upgrade error, removing data", zap.Error(err))
 		if e := os.Remove(options.target.boltPath); e != nil {
-			log.Error("Unable to remove bolt database.", zap.Error(e))
+			log.Error("Unable to remove bolt database", zap.Error(e))
 		}
 
 		if e := os.RemoveAll(options.target.enginePath); e != nil {
-			log.Error("Unable to remove time series data.", zap.Error(e))
+			log.Error("Unable to remove time series data", zap.Error(e))
 		}
 		return err
 	}
@@ -470,7 +481,7 @@ func runUpgradeE(cmd *cobra.Command, options *options, verbose bool) error {
 	}
 	if usersUpgraded > 0 && !v1Config.Http.AuthEnabled {
 		log.Warn(
-			"V1 users were upgraded, but V1 auth was not enabled. Existing clients will fail authentication against V2 if using invalid credentials.",
+			"1.x users were upgraded, but 1.x auth was not enabled. Existing clients will fail authentication against 2.x if using invalid credentials",
 		)
 	}
 
@@ -482,54 +493,95 @@ func runUpgradeE(cmd *cobra.Command, options *options, verbose bool) error {
 	return nil
 }
 
-// validatePaths ensures that all filesystem paths provided as input
-// are usable by the upgrade command
-func validatePaths(sourceOpts *optionsV1, targetOpts *optionsV2) error {
-	if sourceOpts.dbDir != "" {
-		fi, err := os.Stat(sourceOpts.dbDir)
+// validatePaths ensures that all paths pointing to V1 inputs are usable by the upgrade command.
+func (o *optionsV1) validatePaths() error {
+	if o.dbDir != "" {
+		fi, err := os.Stat(o.dbDir)
 		if err != nil {
-			return fmt.Errorf("1.x DB dir '%s' does not exist", sourceOpts.dbDir)
+			return fmt.Errorf("1.x DB dir '%s' does not exist", o.dbDir)
 		}
 		if !fi.IsDir() {
-			return fmt.Errorf("1.x DB dir '%s' is not a directory", sourceOpts.dbDir)
+			return fmt.Errorf("1.x DB dir '%s' is not a directory", o.dbDir)
 		}
 	}
 
-	metaDb := filepath.Join(sourceOpts.metaDir, "meta.db")
+	metaDb := filepath.Join(o.metaDir, "meta.db")
 	_, err := os.Stat(metaDb)
 	if err != nil {
-		return fmt.Errorf("1.x meta.db '%s' does not exist", metaDb)
+		return fmt.Errorf("1.x meta.db '%s' does not exist: %w", metaDb, err)
 	}
 
-	if targetOpts.configPath != "" {
-		if _, err := os.Stat(targetOpts.configPath); err == nil {
-			return fmt.Errorf("file present at target path for upgraded 2.x config file '%s'", targetOpts.configPath)
+	return nil
+}
+
+// validatePaths ensures that none of the paths pointing to V2 outputs refer to existing files.
+func (o *optionsV2) validatePaths() error {
+	if o.configPath != "" {
+		if _, err := os.Stat(o.configPath); err == nil {
+			return fmt.Errorf("file present at target path for upgraded 2.x config file %q", o.configPath)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("error checking for existing file at %q: %w", o.configPath, err)
 		}
 	}
 
-	if _, err = os.Stat(targetOpts.boltPath); err == nil {
-		return fmt.Errorf("file present at target path for upgraded 2.x bolt DB: '%s'", targetOpts.boltPath)
+	if _, err := os.Stat(o.boltPath); err == nil {
+		return fmt.Errorf("file present at target path for upgraded 2.x bolt DB: %q", o.boltPath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("error checking for existing file at %q: %w", o.boltPath, err)
 	}
 
-	if fi, err := os.Stat(targetOpts.enginePath); err == nil {
+	if fi, err := os.Stat(o.enginePath); err == nil {
 		if !fi.IsDir() {
-			return fmt.Errorf("upgraded 2.x engine path '%s' is not a directory", targetOpts.enginePath)
+			return fmt.Errorf("upgraded 2.x engine path %q is not a directory", o.enginePath)
 		}
-		entries, err := ioutil.ReadDir(targetOpts.enginePath)
+		entries, err := os.ReadDir(o.enginePath)
 		if err != nil {
-			return err
+			return fmt.Errorf("error checking contents of existing engine directory %q: %w", o.enginePath, err)
 		}
 		if len(entries) > 0 {
-			return fmt.Errorf("upgraded 2.x engine directory '%s' must be empty", targetOpts.enginePath)
+			return fmt.Errorf("upgraded 2.x engine directory %q must be empty", o.enginePath)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("error checking for existing file at %q: %w", o.enginePath, err)
+	}
+
+	if _, err := os.Stat(o.cliConfigsPath); err == nil {
+		return fmt.Errorf("file present at target path for 2.x CLI configs %q", o.cliConfigsPath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("error checking for existing file at %q: %w", o.cliConfigsPath, err)
+	}
+
+	if _, err := os.Stat(o.cqPath); err == nil {
+		return fmt.Errorf("file present at target path for exported continuous queries %q", o.cqPath)
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("error checking for existing file at %q: %w", o.cqPath, err)
+	}
+
+	return nil
+}
+
+// clearPaths deletes any files already present at the specified V2 output paths.
+func (o *optionsV2) clearPaths() error {
+	if o.configPath != "" {
+		if err := os.RemoveAll(o.configPath); err != nil {
+			return fmt.Errorf("couldn't delete existing file at %q: %w", o.configPath, err)
 		}
 	}
 
-	if _, err = os.Stat(targetOpts.cliConfigsPath); err == nil {
-		return fmt.Errorf("file present at target path for 2.x CLI configs '%s'", targetOpts.cliConfigsPath)
+	if err := os.RemoveAll(o.boltPath); err != nil {
+		return fmt.Errorf("couldn't delete existing file at %q: %w", o.boltPath, err)
 	}
 
-	if _, err = os.Stat(targetOpts.cqPath); err == nil {
-		return fmt.Errorf("file present at target path for exported continuous queries '%s'", targetOpts.cqPath)
+	if err := os.RemoveAll(o.enginePath); err != nil {
+		return fmt.Errorf("couldn't delete existing file at %q: %w", o.enginePath, err)
+	}
+
+	if err := os.RemoveAll(o.cliConfigsPath); err != nil {
+		return fmt.Errorf("couldn't delete existing file at %q: %w", o.cliConfigsPath, err)
+	}
+
+	if err := os.RemoveAll(o.cqPath); err != nil {
+		return fmt.Errorf("couldn't delete existing file at %q: %w", o.cqPath, err)
 	}
 
 	return nil

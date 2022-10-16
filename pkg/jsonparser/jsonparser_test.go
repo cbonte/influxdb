@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/pkg/jsonparser"
 )
 
@@ -16,7 +16,7 @@ func TestGetID(t *testing.T) {
 			t.Error("unexpected error:", err)
 		}
 
-		if exp := influxdb.ID(10); got != exp {
+		if exp := platform.ID(10); got != exp {
 			t.Error("unexpected value: -got/+exp", cmp.Diff(got, exp))
 		}
 	})

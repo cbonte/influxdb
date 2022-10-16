@@ -4,17 +4,16 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"io"
-	"io/ioutil"
 	"time"
 
-	"github.com/influxdata/influxdb/v2"
 	io2 "github.com/influxdata/influxdb/v2/kit/io"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	errors2 "github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/kit/tracing"
 	"github.com/influxdata/influxdb/v2/models"
 	"github.com/opentracing/opentracing-go"
-	"go.uber.org/zap"
-	"istio.io/pkg/log"
 )
 
 var (
@@ -25,9 +24,8 @@ var (
 )
 
 const (
-	opPointsWriter           = "http/pointsWriter"
-	msgUnableToReadData      = "unable to read data"
-	msgWritingRequiresPoints = "writing requires points"
+	opPointsWriter      = "http/pointsWriter"
+	msgUnableToReadData = "unable to read data"
 )
 
 // ParsedPoints contains the points parsed as well as the total number of bytes
@@ -44,35 +42,26 @@ type Parser struct {
 }
 
 // Parse parses the points from an io.ReadCloser for a specific Bucket.
-func (pw *Parser) Parse(ctx context.Context, orgID, bucketID influxdb.ID, rc io.ReadCloser) (*ParsedPoints, error) {
+func (pw *Parser) Parse(ctx context.Context, orgID, bucketID platform.ID, rc io.ReadCloser) (*ParsedPoints, error) {
 	span, ctx := opentracing.StartSpanFromContext(ctx, "write points")
 	defer span.Finish()
 	return pw.parsePoints(ctx, orgID, bucketID, rc)
 }
 
-func (pw *Parser) parsePoints(ctx context.Context, orgID, bucketID influxdb.ID, rc io.ReadCloser) (*ParsedPoints, error) {
+func (pw *Parser) parsePoints(ctx context.Context, orgID, bucketID platform.ID, rc io.ReadCloser) (*ParsedPoints, error) {
 	data, err := readAll(ctx, rc)
 	if err != nil {
-		code := influxdb.EInternal
+		code := errors2.EInternal
 		if errors.Is(err, ErrMaxBatchSizeExceeded) {
-			code = influxdb.ETooLarge
+			code = errors2.ETooLarge
 		} else if errors.Is(err, gzip.ErrHeader) || errors.Is(err, gzip.ErrChecksum) {
-			code = influxdb.EInvalid
+			code = errors2.EInvalid
 		}
-		return nil, &influxdb.Error{
+		return nil, &errors2.Error{
 			Code: code,
 			Op:   opPointsWriter,
 			Msg:  msgUnableToReadData,
 			Err:  err,
-		}
-	}
-
-	requestBytes := len(data)
-	if requestBytes == 0 {
-		return nil, &influxdb.Error{
-			Op:   opPointsWriter,
-			Code: influxdb.EInvalid,
-			Msg:  msgWritingRequiresPoints,
 		}
 	}
 
@@ -82,9 +71,9 @@ func (pw *Parser) parsePoints(ctx context.Context, orgID, bucketID influxdb.ID, 
 	span.LogKV("values_total", len(points))
 	span.Finish()
 	if err != nil {
-		log.Error("Error parsing points", zap.Error(err))
+		tracing.LogError(span, fmt.Errorf("error parsing points: %v", err))
 
-		code := influxdb.EInvalid
+		code := errors2.EInvalid
 		// TODO - backport these
 		// if errors.Is(err, models.ErrLimitMaxBytesExceeded) ||
 		// 	errors.Is(err, models.ErrLimitMaxLinesExceeded) ||
@@ -92,7 +81,7 @@ func (pw *Parser) parsePoints(ctx context.Context, orgID, bucketID influxdb.ID, 
 		// 	code = influxdb.ETooLarge
 		// }
 
-		return nil, &influxdb.Error{
+		return nil, &errors2.Error{
 			Code: code,
 			Op:   opPointsWriter,
 			Msg:  "",
@@ -102,7 +91,7 @@ func (pw *Parser) parsePoints(ctx context.Context, orgID, bucketID influxdb.ID, 
 
 	return &ParsedPoints{
 		Points:  points,
-		RawSize: requestBytes,
+		RawSize: len(data),
 	}, nil
 }
 
@@ -123,7 +112,7 @@ func readAll(ctx context.Context, rc io.ReadCloser) (data []byte, err error) {
 		span.Finish()
 	}()
 
-	data, err = ioutil.ReadAll(rc)
+	data, err = io.ReadAll(rc)
 	if err != nil {
 		return nil, err
 

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/influxdata/influxdb/v2"
 	iql "github.com/influxdata/influxdb/v2/influxql"
 	"github.com/influxdata/influxdb/v2/kit/check"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/kit/tracing"
 	influxlogger "github.com/influxdata/influxdb/v2/logger"
 	"github.com/influxdata/influxql"
@@ -40,8 +40,8 @@ func (s *ProxyExecutor) Query(ctx context.Context, w io.Writer, req *iql.QueryRe
 	p.SetParams(req.Params)
 	q, err := p.ParseQuery()
 	if err != nil {
-		return iql.Statistics{}, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return iql.Statistics{}, &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "failed to parse query",
 			Err:  err,
 		}

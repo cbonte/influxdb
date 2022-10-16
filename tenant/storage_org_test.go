@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kv"
 	"github.com/influxdata/influxdb/v2/mock"
 	"github.com/influxdata/influxdb/v2/tenant"
+	itesting "github.com/influxdata/influxdb/v2/testing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,7 +24,7 @@ import (
 // }
 
 const (
-	firstOrgID influxdb.ID = (iota + 1)
+	firstOrgID platform.ID = (iota + 1)
 	secondOrgID
 	thirdOrgID
 	fourthOrgID
@@ -35,7 +37,7 @@ func TestOrg(t *testing.T) {
 		testOrgs = func(count int, visit ...func(*influxdb.Organization)) (orgs []*influxdb.Organization) {
 			for i := 1; i <= count; i++ {
 				org := &influxdb.Organization{
-					ID:          influxdb.ID(i),
+					ID:          platform.ID(i),
 					Name:        fmt.Sprintf("org%d", i),
 					Description: "words",
 				}
@@ -60,6 +62,13 @@ func TestOrg(t *testing.T) {
 		simpleSetup = func(t *testing.T, store *tenant.Store, tx kv.Tx) {
 			store.OrgIDGen = mock.NewIncrementingIDGenerator(1)
 			for _, org := range testOrgs(10) {
+				require.NoError(t, store.CreateOrg(context.Background(), tx, org))
+			}
+		}
+
+		over20Setup = func(t *testing.T, store *tenant.Store, tx kv.Tx) {
+			store.OrgIDGen = mock.NewIncrementingIDGenerator(1)
+			for _, org := range testOrgs(25) {
 				require.NoError(t, store.CreateOrg(context.Background(), tx, org))
 			}
 		}
@@ -147,6 +156,18 @@ func TestOrg(t *testing.T) {
 			},
 		},
 		{
+			name:  "listOver20",
+			setup: over20Setup,
+			results: func(t *testing.T, store *tenant.Store, tx kv.Tx) {
+				orgs, err := store.ListOrgs(context.Background(), tx)
+				if err != nil {
+					t.Fatal(err)
+				}
+
+				require.Len(t, orgs, 25)
+			},
+		},
+		{
 			name:  "update",
 			setup: simpleSetup,
 			update: func(t *testing.T, store *tenant.Store, tx kv.Tx) {
@@ -205,12 +226,7 @@ func TestOrg(t *testing.T) {
 	}
 	for _, testScenario := range st {
 		t.Run(testScenario.name, func(t *testing.T) {
-			s, closeS, err := NewTestInmemStore(t)
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer closeS()
-
+			s := itesting.NewTestInmemStore(t)
 			ts := tenant.NewStore(s, tenant.WithNow(func() time.Time {
 				return aTime
 			}))

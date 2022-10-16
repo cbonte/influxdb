@@ -8,6 +8,7 @@ import (
 
 	"github.com/influxdata/flux"
 	platform "github.com/influxdata/influxdb/v2"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
 )
 
 const (
@@ -23,7 +24,7 @@ const (
 type Request struct {
 	// Scope
 	Authorization  *platform.Authorization `json:"authorization,omitempty"`
-	OrganizationID platform.ID             `json:"organization_id"`
+	OrganizationID platform2.ID            `json:"organization_id"`
 
 	// Command
 

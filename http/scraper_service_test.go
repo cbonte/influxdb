@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,6 +14,8 @@ import (
 	"github.com/influxdata/influxdb/v2"
 	platcontext "github.com/influxdata/influxdb/v2/context"
 	httpMock "github.com/influxdata/influxdb/v2/http/mock"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"github.com/influxdata/influxdb/v2/kv"
 	"github.com/influxdata/influxdb/v2/mock"
@@ -73,7 +75,7 @@ func TestService_handleGetScraperTargets(t *testing.T) {
 			name: "get all scraper targets",
 			fields: fields{
 				OrganizationService: &mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID:   platformtesting.MustIDBase16("0000000000000211"),
 							Name: "org1",
@@ -81,7 +83,7 @@ func TestService_handleGetScraperTargets(t *testing.T) {
 					},
 				},
 				BucketService: &mock.BucketService{
-					FindBucketByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Bucket, error) {
+					FindBucketByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Bucket, error) {
 						return &influxdb.Bucket{
 							ID:   platformtesting.MustIDBase16("0000000000000212"),
 							Name: "bucket1",
@@ -168,7 +170,7 @@ func TestService_handleGetScraperTargets(t *testing.T) {
 			name: "get all scraper targets when there are none",
 			fields: fields{
 				OrganizationService: &mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID:   platformtesting.MustIDBase16("0000000000000211"),
 							Name: "org1",
@@ -176,7 +178,7 @@ func TestService_handleGetScraperTargets(t *testing.T) {
 					},
 				},
 				BucketService: &mock.BucketService{
-					FindBucketByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Bucket, error) {
+					FindBucketByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Bucket, error) {
 						return &influxdb.Bucket{
 							ID:   platformtesting.MustIDBase16("0000000000000212"),
 							Name: "bucket1",
@@ -208,7 +210,7 @@ func TestService_handleGetScraperTargets(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			scraperBackend := NewMockScraperBackend(t)
-			scraperBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			scraperBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			scraperBackend.ScraperStorageService = tt.fields.ScraperTargetStoreService
 			scraperBackend.OrganizationService = tt.fields.OrganizationService
 			scraperBackend.BucketService = tt.fields.BucketService
@@ -230,7 +232,7 @@ func TestService_handleGetScraperTargets(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleGetScraperTargets() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -276,7 +278,7 @@ func TestService_handleGetScraperTarget(t *testing.T) {
 			name: "get a scraper target by id",
 			fields: fields{
 				OrganizationService: &mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID:   platformtesting.MustIDBase16("0000000000000211"),
 							Name: "org1",
@@ -284,7 +286,7 @@ func TestService_handleGetScraperTarget(t *testing.T) {
 					},
 				},
 				BucketService: &mock.BucketService{
-					FindBucketByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Bucket, error) {
+					FindBucketByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Bucket, error) {
 						return &influxdb.Bucket{
 							ID:   platformtesting.MustIDBase16("0000000000000212"),
 							Name: "bucket1",
@@ -292,7 +294,7 @@ func TestService_handleGetScraperTarget(t *testing.T) {
 					},
 				},
 				ScraperTargetStoreService: &mock.ScraperTargetStoreService{
-					GetTargetByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.ScraperTarget, error) {
+					GetTargetByIDF: func(ctx context.Context, id platform.ID) (*influxdb.ScraperTarget, error) {
 						if id == targetOneID {
 							return &influxdb.ScraperTarget{
 								ID:       targetOneID,
@@ -303,8 +305,8 @@ func TestService_handleGetScraperTarget(t *testing.T) {
 								BucketID: platformtesting.MustIDBase16("0000000000000212"),
 							}, nil
 						}
-						return nil, &influxdb.Error{
-							Code: influxdb.ENotFound,
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "scraper target is not found",
 						}
 					},
@@ -345,7 +347,7 @@ func TestService_handleGetScraperTarget(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			scraperBackend := NewMockScraperBackend(t)
-			scraperBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			scraperBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			scraperBackend.ScraperStorageService = tt.fields.ScraperTargetStoreService
 			scraperBackend.OrganizationService = tt.fields.OrganizationService
 			scraperBackend.BucketService = tt.fields.BucketService
@@ -369,7 +371,7 @@ func TestService_handleGetScraperTarget(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleGetScraperTarget() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -413,7 +415,7 @@ func TestService_handleDeleteScraperTarget(t *testing.T) {
 			name: "delete a scraper target by id",
 			fields: fields{
 				Service: &mock.ScraperTargetStoreService{
-					RemoveTargetF: func(ctx context.Context, id influxdb.ID) error {
+					RemoveTargetF: func(ctx context.Context, id platform.ID) error {
 						if id == targetOneID {
 							return nil
 						}
@@ -433,9 +435,9 @@ func TestService_handleDeleteScraperTarget(t *testing.T) {
 			name: "scraper target not found",
 			fields: fields{
 				Service: &mock.ScraperTargetStoreService{
-					RemoveTargetF: func(ctx context.Context, id influxdb.ID) error {
-						return &influxdb.Error{
-							Code: influxdb.ENotFound,
+					RemoveTargetF: func(ctx context.Context, id platform.ID) error {
+						return &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  influxdb.ErrScraperTargetNotFound,
 						}
 					},
@@ -453,7 +455,7 @@ func TestService_handleDeleteScraperTarget(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			scraperBackend := NewMockScraperBackend(t)
-			scraperBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			scraperBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			scraperBackend.ScraperStorageService = tt.fields.Service
 			h := NewScraperHandler(zaptest.NewLogger(t), scraperBackend)
 
@@ -475,7 +477,7 @@ func TestService_handleDeleteScraperTarget(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleDeleteScraperTarget() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -521,7 +523,7 @@ func TestService_handlePostScraperTarget(t *testing.T) {
 			name: "create a new scraper target",
 			fields: fields{
 				OrganizationService: &mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID:   platformtesting.MustIDBase16("0000000000000211"),
 							Name: "org1",
@@ -529,7 +531,7 @@ func TestService_handlePostScraperTarget(t *testing.T) {
 					},
 				},
 				BucketService: &mock.BucketService{
-					FindBucketByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Bucket, error) {
+					FindBucketByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Bucket, error) {
 						return &influxdb.Bucket{
 							ID:   platformtesting.MustIDBase16("0000000000000212"),
 							Name: "bucket1",
@@ -537,7 +539,7 @@ func TestService_handlePostScraperTarget(t *testing.T) {
 					},
 				},
 				ScraperTargetStoreService: &mock.ScraperTargetStoreService{
-					AddTargetF: func(ctx context.Context, st *influxdb.ScraperTarget, userID influxdb.ID) error {
+					AddTargetF: func(ctx context.Context, st *influxdb.ScraperTarget, userID platform.ID) error {
 						st.ID = targetOneID
 						return nil
 					},
@@ -584,7 +586,7 @@ func TestService_handlePostScraperTarget(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			scraperBackend := NewMockScraperBackend(t)
-			scraperBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			scraperBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			scraperBackend.ScraperStorageService = tt.fields.ScraperTargetStoreService
 			scraperBackend.OrganizationService = tt.fields.OrganizationService
 			scraperBackend.BucketService = tt.fields.BucketService
@@ -603,7 +605,7 @@ func TestService_handlePostScraperTarget(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePostScraperTarget() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -650,7 +652,7 @@ func TestService_handlePatchScraperTarget(t *testing.T) {
 			name: "update a scraper target",
 			fields: fields{
 				OrganizationService: &mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID:   platformtesting.MustIDBase16("0000000000000211"),
 							Name: "org1",
@@ -658,7 +660,7 @@ func TestService_handlePatchScraperTarget(t *testing.T) {
 					},
 				},
 				BucketService: &mock.BucketService{
-					FindBucketByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Bucket, error) {
+					FindBucketByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Bucket, error) {
 						return &influxdb.Bucket{
 							ID:   platformtesting.MustIDBase16("0000000000000212"),
 							Name: "bucket1",
@@ -666,13 +668,13 @@ func TestService_handlePatchScraperTarget(t *testing.T) {
 					},
 				},
 				ScraperTargetStoreService: &mock.ScraperTargetStoreService{
-					UpdateTargetF: func(ctx context.Context, t *influxdb.ScraperTarget, userID influxdb.ID) (*influxdb.ScraperTarget, error) {
+					UpdateTargetF: func(ctx context.Context, t *influxdb.ScraperTarget, userID platform.ID) (*influxdb.ScraperTarget, error) {
 						if t.ID == targetOneID {
 							return t, nil
 						}
 
-						return nil, &influxdb.Error{
-							Code: influxdb.ENotFound,
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "scraper target is not found",
 						}
 					},
@@ -718,7 +720,7 @@ func TestService_handlePatchScraperTarget(t *testing.T) {
 			name: "scraper target not found",
 			fields: fields{
 				OrganizationService: &mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID:   platformtesting.MustIDBase16("0000000000000211"),
 							Name: "org1",
@@ -726,7 +728,7 @@ func TestService_handlePatchScraperTarget(t *testing.T) {
 					},
 				},
 				BucketService: &mock.BucketService{
-					FindBucketByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Bucket, error) {
+					FindBucketByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Bucket, error) {
 						return &influxdb.Bucket{
 							ID:   platformtesting.MustIDBase16("0000000000000212"),
 							Name: "bucket1",
@@ -734,9 +736,9 @@ func TestService_handlePatchScraperTarget(t *testing.T) {
 					},
 				},
 				ScraperTargetStoreService: &mock.ScraperTargetStoreService{
-					UpdateTargetF: func(ctx context.Context, upd *influxdb.ScraperTarget, userID influxdb.ID) (*influxdb.ScraperTarget, error) {
-						return nil, &influxdb.Error{
-							Code: influxdb.ENotFound,
+					UpdateTargetF: func(ctx context.Context, upd *influxdb.ScraperTarget, userID platform.ID) (*influxdb.ScraperTarget, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  influxdb.ErrScraperTargetNotFound,
 						}
 					},
@@ -762,7 +764,7 @@ func TestService_handlePatchScraperTarget(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			scraperBackend := NewMockScraperBackend(t)
-			scraperBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			scraperBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			scraperBackend.ScraperStorageService = tt.fields.ScraperTargetStoreService
 			scraperBackend.OrganizationService = tt.fields.OrganizationService
 			scraperBackend.BucketService = tt.fields.BucketService
@@ -795,7 +797,7 @@ func TestService_handlePatchScraperTarget(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePatchScraperTarget() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -817,7 +819,7 @@ func TestService_handlePatchScraperTarget(t *testing.T) {
 func initScraperService(f platformtesting.TargetFields, t *testing.T) (influxdb.ScraperTargetStoreService, string, func()) {
 	t.Helper()
 
-	store := NewTestInmemStore(t)
+	store := platformtesting.NewTestInmemStore(t)
 	tenantStore := tenant.NewStore(store)
 	tenantService := tenant.NewService(tenantStore)
 
@@ -840,11 +842,11 @@ func initScraperService(f platformtesting.TargetFields, t *testing.T) (influxdb.
 	}
 
 	scraperBackend := NewMockScraperBackend(t)
-	scraperBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+	scraperBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 	scraperBackend.ScraperStorageService = svc
 	scraperBackend.OrganizationService = tenantService
 	scraperBackend.BucketService = &mock.BucketService{
-		FindBucketByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Bucket, error) {
+		FindBucketByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Bucket, error) {
 			return &influxdb.Bucket{
 				ID:   id,
 				Name: "bucket1",

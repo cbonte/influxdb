@@ -11,11 +11,13 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	dto "github.com/prometheus/client_model/go"
 )
 
 var (
-	orgID, _    = influxdb.IDFromString("020f755c3c082000")
-	bucketID, _ = influxdb.IDFromString("020f755c3c082001")
+	orgID, _    = platform.IDFromString("020f755c3c082000")
+	bucketID, _ = platform.IDFromString("020f755c3c082001")
 )
 
 func TestPrometheusScraper(t *testing.T) {
@@ -48,7 +50,7 @@ func TestPrometheusScraper(t *testing.T) {
 			ms: []Metrics{
 				{
 					Name: "go_gc_duration_seconds",
-					Type: MetricTypeSummary,
+					Type: dto.MetricType_SUMMARY,
 					Fields: map[string]interface{}{
 						"count": float64(326),
 						"sum":   0.07497837,
@@ -62,7 +64,7 @@ func TestPrometheusScraper(t *testing.T) {
 				},
 				{
 					Name: "go_goroutines",
-					Type: MetricTypeGauge,
+					Type: dto.MetricType_GAUGE,
 					Tags: map[string]string{},
 					Fields: map[string]interface{}{
 						"gauge": float64(36),
@@ -70,7 +72,7 @@ func TestPrometheusScraper(t *testing.T) {
 				},
 				{
 					Name: "go_info",
-					Type: MetricTypeGauge,
+					Type: dto.MetricType_GAUGE,
 					Tags: map[string]string{
 						"version": "go1.10.3",
 					},
@@ -80,7 +82,7 @@ func TestPrometheusScraper(t *testing.T) {
 				},
 				{
 					Name: "go_memstats_alloc_bytes",
-					Type: MetricTypeGauge,
+					Type: dto.MetricType_GAUGE,
 					Tags: map[string]string{},
 					Fields: map[string]interface{}{
 						"gauge": 2.0091312e+07,
@@ -88,7 +90,7 @@ func TestPrometheusScraper(t *testing.T) {
 				},
 				{
 					Name: "go_memstats_alloc_bytes_total",
-					Type: MetricTypeCounter,
+					Type: dto.MetricType_COUNTER,
 					Fields: map[string]interface{}{
 						"counter": 4.183173328e+09,
 					},
@@ -96,7 +98,7 @@ func TestPrometheusScraper(t *testing.T) {
 				},
 				{
 					Name: "go_memstats_buck_hash_sys_bytes",
-					Type: MetricTypeGauge,
+					Type: dto.MetricType_GAUGE,
 					Tags: map[string]string{},
 					Fields: map[string]interface{}{
 						"gauge": 1.533852e+06,
@@ -104,7 +106,7 @@ func TestPrometheusScraper(t *testing.T) {
 				},
 				{
 					Name: "go_memstats_frees_total",
-					Type: MetricTypeCounter,
+					Type: dto.MetricType_COUNTER,
 					Tags: map[string]string{},
 					Fields: map[string]interface{}{
 						"counter": 1.8944339e+07,
@@ -112,7 +114,7 @@ func TestPrometheusScraper(t *testing.T) {
 				},
 				{
 					Name: "go_memstats_gc_cpu_fraction",
-					Type: MetricTypeGauge,
+					Type: dto.MetricType_GAUGE,
 					Tags: map[string]string{},
 					Fields: map[string]interface{}{
 						"gauge": 1.972734963012756e-05,
@@ -130,7 +132,7 @@ func TestPrometheusScraper(t *testing.T) {
 			defer ts.Close()
 			url = ts.URL
 		}
-		results, err := scraper.Gather(context.Background(), influxdb.ScraperTarget{
+		results, err := scraper.Gather(influxdb.ScraperTarget{
 			URL:      url + "/metrics",
 			OrgID:    *orgID,
 			BucketID: *bucketID,
@@ -194,19 +196,8 @@ type mockStorage struct {
 	sync.RWMutex
 	influxdb.UserResourceMappingService
 	influxdb.OrganizationService
-	TotalGatherJobs chan struct{}
-	Metrics         map[time.Time]Metrics
-	Targets         []influxdb.ScraperTarget
-}
-
-func (s *mockStorage) Record(collected MetricsCollection) error {
-	s.Lock()
-	defer s.Unlock()
-	for _, m := range collected.MetricsSlice {
-		s.Metrics[m.Timestamp] = m
-	}
-	s.TotalGatherJobs <- struct{}{}
-	return nil
+	Metrics map[time.Time]Metrics
+	Targets []influxdb.ScraperTarget
 }
 
 func (s *mockStorage) ListTargets(ctx context.Context, filter influxdb.ScraperTargetFilter) (targets []influxdb.ScraperTarget, err error) {
@@ -220,7 +211,7 @@ func (s *mockStorage) ListTargets(ctx context.Context, filter influxdb.ScraperTa
 	return s.Targets, nil
 }
 
-func (s *mockStorage) AddTarget(ctx context.Context, t *influxdb.ScraperTarget, userID influxdb.ID) error {
+func (s *mockStorage) AddTarget(ctx context.Context, t *influxdb.ScraperTarget, userID platform.ID) error {
 	s.Lock()
 	defer s.Unlock()
 	if s.Targets == nil {
@@ -230,7 +221,7 @@ func (s *mockStorage) AddTarget(ctx context.Context, t *influxdb.ScraperTarget, 
 	return nil
 }
 
-func (s *mockStorage) RemoveTarget(ctx context.Context, id influxdb.ID) error {
+func (s *mockStorage) RemoveTarget(ctx context.Context, id platform.ID) error {
 	s.Lock()
 	defer s.Unlock()
 
@@ -246,7 +237,7 @@ func (s *mockStorage) RemoveTarget(ctx context.Context, id influxdb.ID) error {
 	return nil
 }
 
-func (s *mockStorage) GetTargetByID(ctx context.Context, id influxdb.ID) (target *influxdb.ScraperTarget, err error) {
+func (s *mockStorage) GetTargetByID(ctx context.Context, id platform.ID) (target *influxdb.ScraperTarget, err error) {
 	s.RLock()
 	defer s.RUnlock()
 
@@ -261,7 +252,7 @@ func (s *mockStorage) GetTargetByID(ctx context.Context, id influxdb.ID) (target
 
 }
 
-func (s *mockStorage) UpdateTarget(ctx context.Context, update *influxdb.ScraperTarget, userID influxdb.ID) (target *influxdb.ScraperTarget, err error) {
+func (s *mockStorage) UpdateTarget(ctx context.Context, update *influxdb.ScraperTarget, userID platform.ID) (target *influxdb.ScraperTarget, err error) {
 	s.Lock()
 	defer s.Unlock()
 

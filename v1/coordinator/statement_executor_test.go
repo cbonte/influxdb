@@ -19,6 +19,7 @@ import (
 	"github.com/influxdata/influxdb/v2/influxql/control"
 	"github.com/influxdata/influxdb/v2/influxql/query"
 	"github.com/influxdata/influxdb/v2/internal"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/models"
 	itesting "github.com/influxdata/influxdb/v2/testing"
 	"github.com/influxdata/influxdb/v2/tsdb"
@@ -41,11 +42,11 @@ func TestQueryExecutor_ExecuteQuery_SelectStatement(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	dbrp := mocks.NewMockDBRPMappingServiceV2(ctrl)
-	orgID := influxdb.ID(0xff00)
+	dbrp := mocks.NewMockDBRPMappingService(ctrl)
+	orgID := platform.ID(0xff00)
 	empty := ""
-	filt := influxdb.DBRPMappingFilterV2{OrgID: &orgID, Database: &empty, RetentionPolicy: &empty}
-	res := []*influxdb.DBRPMappingV2{{}}
+	filt := influxdb.DBRPMappingFilter{OrgID: &orgID, Database: &empty, RetentionPolicy: &empty, Virtual: nil}
+	res := []*influxdb.DBRPMapping{{}}
 	dbrp.EXPECT().
 		FindMany(gomock.Any(), filt).
 		Return(res, 1, nil)
@@ -107,11 +108,11 @@ func TestQueryExecutor_ExecuteQuery_MaxSelectBucketsN(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	dbrp := mocks.NewMockDBRPMappingServiceV2(ctrl)
-	orgID := influxdb.ID(0xff00)
+	dbrp := mocks.NewMockDBRPMappingService(ctrl)
+	orgID := platform.ID(0xff00)
 	empty := ""
-	filt := influxdb.DBRPMappingFilterV2{OrgID: &orgID, Database: &empty, RetentionPolicy: &empty}
-	res := []*influxdb.DBRPMappingV2{{}}
+	filt := influxdb.DBRPMappingFilter{OrgID: &orgID, Database: &empty, RetentionPolicy: &empty, Virtual: nil}
+	res := []*influxdb.DBRPMapping{{}}
 	dbrp.EXPECT().
 		FindMany(gomock.Any(), filt).
 		Return(res, 1, nil)
@@ -225,11 +226,11 @@ func TestStatementExecutor_NormalizeStatement(t *testing.T) {
 			ctrl := gomock.NewController(t)
 			defer ctrl.Finish()
 
-			dbrp := mocks.NewMockDBRPMappingServiceV2(ctrl)
-			orgID := influxdb.ID(0xff00)
-			bucketID := influxdb.ID(0xffee)
-			filt := influxdb.DBRPMappingFilterV2{OrgID: &orgID, Database: &testCase.expectedDB}
-			res := []*influxdb.DBRPMappingV2{{Database: testCase.expectedDB, RetentionPolicy: testCase.expectedRP, OrganizationID: orgID, BucketID: bucketID, Default: true}}
+			dbrp := mocks.NewMockDBRPMappingService(ctrl)
+			orgID := platform.ID(0xff00)
+			bucketID := platform.ID(0xffee)
+			filt := influxdb.DBRPMappingFilter{OrgID: &orgID, Database: &testCase.expectedDB}
+			res := []*influxdb.DBRPMapping{{Database: testCase.expectedDB, RetentionPolicy: testCase.expectedRP, OrganizationID: orgID, BucketID: bucketID, Default: true}}
 			dbrp.EXPECT().
 				FindMany(gomock.Any(), filt).
 				Return(res, 1, nil)
@@ -329,10 +330,10 @@ func TestQueryExecutor_ExecuteQuery_ShowDatabases(t *testing.T) {
 	ctrl := gomock.NewController(t)
 	defer ctrl.Finish()
 
-	dbrp := mocks.NewMockDBRPMappingServiceV2(ctrl)
-	orgID := influxdb.ID(0xff00)
-	filt := influxdb.DBRPMappingFilterV2{OrgID: &orgID}
-	res := []*influxdb.DBRPMappingV2{
+	dbrp := mocks.NewMockDBRPMappingService(ctrl)
+	orgID := platform.ID(0xff00)
+	filt := influxdb.DBRPMappingFilter{OrgID: &orgID}
+	res := []*influxdb.DBRPMapping{
 		{Database: "db1", OrganizationID: orgID, BucketID: 0xffe0},
 		{Database: "db2", OrganizationID: orgID, BucketID: 0xffe1},
 		{Database: "db3", OrganizationID: orgID, BucketID: 0xffe2},
@@ -385,13 +386,171 @@ func TestQueryExecutor_ExecuteQuery_ShowDatabases(t *testing.T) {
 	}
 }
 
+func testExecDeleteSeriesOrDropMeasurement(t *testing.T, qType string) {
+	orgID := platform.ID(0xff00)
+	otherOrgID := platform.ID(0xff01)
+	bucketID := platform.ID(0xffee)
+	otherBucketID := platform.ID(0xffef)
+
+	qStr := qType
+	if qStr == "DELETE" {
+		qStr = "DELETE FROM"
+	}
+	qErr := errors.New("insufficient permissions")
+
+	testCases := []struct {
+		name        string
+		query       string
+		permissions []influxdb.Permission
+		expectedErr error
+	}{
+		// expected FAIL
+		{
+			name:  fmt.Sprintf("read-only bucket (%s)", qType),
+			query: qStr,
+			permissions: []influxdb.Permission{
+				*itesting.MustNewPermissionAtID(bucketID, influxdb.ReadAction, influxdb.BucketsResourceType, orgID),
+			},
+			expectedErr: qErr,
+		},
+		{
+			name:  fmt.Sprintf("read-only all buckets (%s)", qType),
+			query: qStr,
+			permissions: []influxdb.Permission{
+				*itesting.MustNewPermission(influxdb.ReadAction, influxdb.BucketsResourceType, orgID),
+			},
+			expectedErr: qErr,
+		},
+		{
+			name:  fmt.Sprintf("write-only other bucket (%s)", qType),
+			query: qStr,
+			permissions: []influxdb.Permission{
+				*itesting.MustNewPermissionAtID(otherBucketID, influxdb.WriteAction, influxdb.BucketsResourceType, orgID),
+			},
+			expectedErr: qErr,
+		},
+		{
+			name:  fmt.Sprintf("write-only other org (%s)", qType),
+			query: qStr,
+			permissions: []influxdb.Permission{
+				*itesting.MustNewPermission(influxdb.WriteAction, influxdb.BucketsResourceType, otherOrgID),
+			},
+			expectedErr: qErr,
+		},
+		{
+			name:  fmt.Sprintf("read-write other org (%s)", qType),
+			query: qStr,
+			permissions: []influxdb.Permission{
+				*itesting.MustNewPermission(influxdb.ReadAction, influxdb.BucketsResourceType, otherOrgID),
+				*itesting.MustNewPermission(influxdb.WriteAction, influxdb.BucketsResourceType, otherOrgID),
+			},
+			expectedErr: qErr,
+		},
+		// expected PASS
+		{
+			name:  fmt.Sprintf("write-only bucket (%s)", qType),
+			query: qStr,
+			permissions: []influxdb.Permission{
+				*itesting.MustNewPermissionAtID(bucketID, influxdb.WriteAction, influxdb.BucketsResourceType, orgID),
+			},
+			expectedErr: nil,
+		},
+		{
+			name:  fmt.Sprintf("write-only all buckets (%s)", qType),
+			query: qStr,
+			permissions: []influxdb.Permission{
+				*itesting.MustNewPermission(influxdb.WriteAction, influxdb.BucketsResourceType, orgID),
+			},
+			expectedErr: nil,
+		},
+		{
+			name:  fmt.Sprintf("read-write bucket (%s)", qType),
+			query: qStr,
+			permissions: []influxdb.Permission{
+				*itesting.MustNewPermissionAtID(bucketID, influxdb.ReadAction, influxdb.BucketsResourceType, orgID),
+				*itesting.MustNewPermissionAtID(bucketID, influxdb.WriteAction, influxdb.BucketsResourceType, orgID),
+			},
+			expectedErr: nil,
+		},
+		{
+			name:  fmt.Sprintf("read-write all buckets (%s)", qType),
+			query: qStr,
+			permissions: []influxdb.Permission{
+				*itesting.MustNewPermission(influxdb.ReadAction, influxdb.BucketsResourceType, orgID),
+				*itesting.MustNewPermission(influxdb.WriteAction, influxdb.BucketsResourceType, orgID),
+			},
+			expectedErr: nil,
+		},
+	}
+
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			// setup a DBRP that we can use
+			dbrp := mocks.NewMockDBRPMappingService(ctrl)
+			db := "db0"
+
+			empty := ""
+			isDefault := true
+			filt := influxdb.DBRPMappingFilter{OrgID: &orgID, Database: &db, RetentionPolicy: nil, Default: &isDefault}
+			res := []*influxdb.DBRPMapping{{Database: db, RetentionPolicy: empty, OrganizationID: orgID, BucketID: bucketID, Default: isDefault}}
+			dbrp.EXPECT().
+				FindMany(gomock.Any(), filt).
+				Return(res, 1, nil)
+
+			qe := DefaultQueryExecutor(t, WithDBRP(dbrp))
+
+			// assume storage succeeds if we get that far
+			qe.TSDBStore.DeleteSeriesFn = func(context.Context, string, []influxql.Source, influxql.Expr) error {
+				return nil
+			}
+			qe.TSDBStore.DeleteMeasurementFn = func(context.Context, string, string) error {
+				return nil
+			}
+
+			ctx := context.Background()
+			ctx = icontext.SetAuthorizer(ctx, &influxdb.Authorization{
+				ID:          orgID,
+				OrgID:       orgID,
+				Status:      influxdb.Active,
+				Permissions: testCase.permissions,
+			})
+
+			results := ReadAllResults(qe.ExecuteQuery(ctx, fmt.Sprintf("%s cpu", testCase.query), "db0", 0, orgID))
+
+			var exp []*query.Result
+			if testCase.expectedErr != nil {
+				exp = []*query.Result{
+					{
+						StatementID: 0,
+						Err:         testCase.expectedErr,
+					},
+				}
+			}
+			if !reflect.DeepEqual(results, exp) {
+				t.Fatalf("unexpected results: exp %s, got %s", spew.Sdump(exp), spew.Sdump(results))
+			}
+		})
+	}
+}
+
+func TestQueryExecutor_ExecuteQuery_DeleteSeries(t *testing.T) {
+	testExecDeleteSeriesOrDropMeasurement(t, "DELETE")
+}
+
+func TestQueryExecutor_ExecuteQuery_DropMeasurement(t *testing.T) {
+	testExecDeleteSeriesOrDropMeasurement(t, "DROP MEASUREMENT")
+}
+
 // QueryExecutor is a test wrapper for coordinator.QueryExecutor.
 type QueryExecutor struct {
 	*query.Executor
 
 	MetaClient        MetaClient
 	TSDBStore         *internal.TSDBStoreMock
-	DBRP              *mocks.MockDBRPMappingServiceV2
+	DBRP              *mocks.MockDBRPMappingService
 	StatementExecutor *coordinator.StatementExecutor
 	LogOutput         bytes.Buffer
 }
@@ -412,11 +571,11 @@ func NewQueryExecutor(t *testing.T, opts ...optFn) *QueryExecutor {
 		return nil
 	}
 
-	e.TSDBStore.MeasurementNamesFn = func(auth query.Authorizer, database string, cond influxql.Expr) ([][]byte, error) {
+	e.TSDBStore.MeasurementNamesFn = func(_ context.Context, auth query.Authorizer, database string, cond influxql.Expr) ([][]byte, error) {
 		return nil, nil
 	}
 
-	e.TSDBStore.TagValuesFn = func(_ query.Authorizer, _ []uint64, _ influxql.Expr) ([]tsdb.TagValues, error) {
+	e.TSDBStore.TagValuesFn = func(_ context.Context, _ query.Authorizer, _ []uint64, _ influxql.Expr) ([]tsdb.TagValues, error) {
 		return nil, nil
 	}
 
@@ -437,7 +596,7 @@ func NewQueryExecutor(t *testing.T, opts ...optFn) *QueryExecutor {
 
 type optFn func(qe *QueryExecutor)
 
-func WithDBRP(dbrp *mocks.MockDBRPMappingServiceV2) optFn {
+func WithDBRP(dbrp *mocks.MockDBRPMappingService) optFn {
 	return func(qe *QueryExecutor) {
 		qe.DBRP = dbrp
 	}
@@ -451,7 +610,7 @@ func DefaultQueryExecutor(t *testing.T, opts ...optFn) *QueryExecutor {
 }
 
 // ExecuteQuery parses query and executes against the database.
-func (e *QueryExecutor) ExecuteQuery(ctx context.Context, q, database string, chunkSize int, orgID influxdb.ID) (<-chan *query.Result, *influxql2.Statistics) {
+func (e *QueryExecutor) ExecuteQuery(ctx context.Context, q, database string, chunkSize int, orgID platform.ID) (<-chan *query.Result, *influxql2.Statistics) {
 	return e.Executor.ExecuteQuery(ctx, MustParseQuery(q), query.ExecutionOptions{
 		OrgID:     orgID,
 		Database:  database,
@@ -464,7 +623,7 @@ type MockShard struct {
 	FieldDimensionsFn        func(measurements []string) (fields map[string]influxql.DataType, dimensions map[string]struct{}, err error)
 	FieldKeysByMeasurementFn func(name []byte) []string
 	CreateIteratorFn         func(ctx context.Context, m *influxql.Measurement, opt query.IteratorOptions) (query.Iterator, error)
-	IteratorCostFn           func(m string, opt query.IteratorOptions) (query.IteratorCost, error)
+	IteratorCostFn           func(ctx context.Context, m string, opt query.IteratorOptions) (query.IteratorCost, error)
 	ExpandSourcesFn          func(sources influxql.Sources) (influxql.Sources, error)
 }
 
@@ -504,8 +663,8 @@ func (sh *MockShard) CreateIterator(ctx context.Context, measurement *influxql.M
 	return sh.CreateIteratorFn(ctx, measurement, opt)
 }
 
-func (sh *MockShard) IteratorCost(measurement string, opt query.IteratorOptions) (query.IteratorCost, error) {
-	return sh.IteratorCostFn(measurement, opt)
+func (sh *MockShard) IteratorCost(ctx context.Context, measurement string, opt query.IteratorOptions) (query.IteratorCost, error) {
+	return sh.IteratorCostFn(ctx, measurement, opt)
 }
 
 func (sh *MockShard) ExpandSources(sources influxql.Sources) (influxql.Sources, error) {

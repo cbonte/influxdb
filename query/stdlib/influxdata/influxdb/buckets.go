@@ -12,6 +12,7 @@ import (
 	"github.com/influxdata/flux/stdlib/influxdata/influxdb"
 	"github.com/influxdata/flux/values"
 	platform "github.com/influxdata/influxdb/v2"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/query"
 )
 
@@ -35,10 +36,10 @@ func (s *LocalBucketsProcedureSpec) Copy() plan.ProcedureSpec {
 }
 
 type BucketsDecoder struct {
-	orgID   platform.ID
+	orgID   platform2.ID
 	deps    BucketDependencies
 	buckets []*platform.Bucket
-	alloc   *memory.Allocator
+	alloc   memory.Allocator
 }
 
 func (bd *BucketsDecoder) Connect(ctx context.Context) error {
@@ -140,7 +141,7 @@ func createBucketsSource(prSpec plan.ProcedureSpec, dsid execute.DatasetID, a ex
 }
 
 type AllBucketLookup interface {
-	FindAllBuckets(ctx context.Context, orgID platform.ID) ([]*platform.Bucket, int)
+	FindAllBuckets(ctx context.Context, orgID platform2.ID) ([]*platform.Bucket, int)
 }
 type BucketDependencies AllBucketLookup
 
@@ -151,7 +152,7 @@ func (rule LocalBucketsRule) Name() string {
 }
 
 func (rule LocalBucketsRule) Pattern() plan.Pattern {
-	return plan.Pat(influxdb.BucketsKind)
+	return plan.MultiSuccessor(influxdb.BucketsKind)
 }
 
 func (rule LocalBucketsRule) Rewrite(ctx context.Context, node plan.Node) (plan.Node, bool, error) {

@@ -6,14 +6,16 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 
 	"github.com/go-chi/chi"
 	"github.com/go-chi/chi/middleware"
-	"github.com/influxdata/influxdb/v2"
 	pctx "github.com/influxdata/influxdb/v2/context"
 	ierrors "github.com/influxdata/influxdb/v2/kit/errors"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"github.com/influxdata/influxdb/v2/pkg/jsonnet"
 	"go.uber.org/zap"
@@ -28,14 +30,16 @@ type HTTPServerTemplates struct {
 	api    *kithttp.API
 	logger *zap.Logger
 	svc    SVC
+	client *http.Client
 }
 
 // NewHTTPServerTemplates constructs a new http server.
-func NewHTTPServerTemplates(log *zap.Logger, svc SVC) *HTTPServerTemplates {
+func NewHTTPServerTemplates(log *zap.Logger, svc SVC, client *http.Client) *HTTPServerTemplates {
 	svr := &HTTPServerTemplates{
 		api:    kithttp.NewAPI(kithttp.WithLog(log)),
 		logger: log,
 		svc:    svc,
+		client: client,
 	}
 
 	exportAllowContentTypes := middleware.AllowContentType("text/yml", "application/x-yaml", "application/json")
@@ -75,23 +79,23 @@ type ReqExport struct {
 // OK validates a create request.
 func (r *ReqExport) OK() error {
 	if len(r.Resources) == 0 && len(r.OrgIDs) == 0 && r.StackID == "" {
-		return &influxdb.Error{
-			Code: influxdb.EUnprocessableEntity,
+		return &errors.Error{
+			Code: errors.EUnprocessableEntity,
 			Msg:  "at least 1 resource, 1 org id, or stack id must be provided",
 		}
 	}
 
 	for _, org := range r.OrgIDs {
-		if _, err := influxdb.IDFromString(org.OrgID); err != nil {
-			return &influxdb.Error{
-				Code: influxdb.EInvalid,
+		if _, err := platform.IDFromString(org.OrgID); err != nil {
+			return &errors.Error{
+				Code: errors.EInvalid,
 				Msg:  fmt.Sprintf("provided org id is invalid: %q", org.OrgID),
 			}
 		}
 	}
 
 	if r.StackID != "" {
-		_, err := influxdb.IDFromString(r.StackID)
+		_, err := platform.IDFromString(r.StackID)
 		return err
 	}
 	return nil
@@ -112,7 +116,7 @@ func (s *HTTPServerTemplates) export(w http.ResponseWriter, r *http.Request) {
 		ExportWithExistingResources(reqBody.Resources...),
 	}
 	for _, orgIDStr := range reqBody.OrgIDs {
-		orgID, err := influxdb.IDFromString(orgIDStr.OrgID)
+		orgID, err := platform.IDFromString(orgIDStr.OrgID)
 		if err != nil {
 			continue
 		}
@@ -124,10 +128,10 @@ func (s *HTTPServerTemplates) export(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if reqBody.StackID != "" {
-		stackID, err := influxdb.IDFromString(reqBody.StackID)
+		stackID, err := platform.IDFromString(reqBody.StackID)
 		if err != nil {
-			s.api.Err(w, r, &influxdb.Error{
-				Code: influxdb.EInvalid,
+			s.api.Err(w, r, &errors.Error{
+				Code: errors.EInvalid,
 				Msg:  fmt.Sprintf("invalid stack ID provided: %q", reqBody.StackID),
 			})
 			return
@@ -210,16 +214,16 @@ type ReqApply struct {
 }
 
 // Templates returns all templates associated with the request.
-func (r ReqApply) Templates(encoding Encoding) (*Template, error) {
+func (r ReqApply) Templates(encoding Encoding, client *http.Client) (*Template, error) {
 	var rawTemplates []*Template
 	for _, rem := range r.Remotes {
 		if rem.URL == "" {
 			continue
 		}
-		template, err := Parse(rem.Encoding(), FromHTTPRequest(rem.URL), ValidSkipParseError())
+		template, err := Parse(rem.Encoding(), FromHTTPRequest(rem.URL, client), ValidSkipParseError())
 		if err != nil {
 			msg := fmt.Sprintf("template from url[%s] had an issue: %s", rem.URL, err.Error())
-			return nil, influxErr(influxdb.EUnprocessableEntity, msg)
+			return nil, influxErr(errors.EUnprocessableEntity, msg)
 		}
 		rawTemplates = append(rawTemplates, template)
 	}
@@ -236,7 +240,7 @@ func (r ReqApply) Templates(encoding Encoding) (*Template, error) {
 		if err != nil {
 			sources := formatSources(rawTmpl.Sources)
 			msg := fmt.Sprintf("template[%d] from source(s) %q had an issue: %s", i, sources, err.Error())
-			return nil, influxErr(influxdb.EUnprocessableEntity, msg)
+			return nil, influxErr(errors.EUnprocessableEntity, msg)
 		}
 		rawTemplates = append(rawTemplates, template)
 	}
@@ -277,19 +281,19 @@ func (r ReqApply) validActions() (struct {
 		case ActionTypeSkipResource:
 			var asr ActionSkipResource
 			if err := json.Unmarshal(rawAct.Properties, &asr); err != nil {
-				return actions{}, influxErr(influxdb.EInvalid, unmarshalErrFn(err, i, a))
+				return actions{}, influxErr(errors.EInvalid, unmarshalErrFn(err, i, a))
 			}
 			if err := asr.Kind.OK(); err != nil {
-				return actions{}, influxErr(influxdb.EInvalid, kindErrFn(err, i, a))
+				return actions{}, influxErr(errors.EInvalid, kindErrFn(err, i, a))
 			}
 			out.SkipResources = append(out.SkipResources, asr)
 		case ActionTypeSkipKind:
 			var ask ActionSkipKind
 			if err := json.Unmarshal(rawAct.Properties, &ask); err != nil {
-				return actions{}, influxErr(influxdb.EInvalid, unmarshalErrFn(err, i, a))
+				return actions{}, influxErr(errors.EInvalid, unmarshalErrFn(err, i, a))
 			}
 			if err := ask.Kind.OK(); err != nil {
-				return actions{}, influxErr(influxdb.EInvalid, kindErrFn(err, i, a))
+				return actions{}, influxErr(errors.EInvalid, kindErrFn(err, i, a))
 			}
 			out.SkipKinds = append(out.SkipKinds, ask)
 		default:
@@ -297,7 +301,7 @@ func (r ReqApply) validActions() (struct {
 				"invalid action type %q provided for actions[%d] ; Must be one of [%s]",
 				a, i, ActionTypeSkipResource,
 			)
-			return actions{}, influxErr(influxdb.EInvalid, msg)
+			return actions{}, influxErr(errors.EInvalid, msg)
 		}
 	}
 
@@ -314,6 +318,14 @@ type RespApply struct {
 	Errors []ValidationErr `json:"errors,omitempty" yaml:"errors,omitempty"`
 }
 
+// RespApplyErr is the response body for a dry-run parse error in the apply template endpoint.
+type RespApplyErr struct {
+	RespApply
+
+	Code    string `json:"code" yaml:"code"`
+	Message string `json:"message" yaml:"message"`
+}
+
 func (s *HTTPServerTemplates) apply(w http.ResponseWriter, r *http.Request) {
 	var reqBody ReqApply
 	encoding, err := decodeWithEncoding(r, &reqBody)
@@ -322,30 +334,64 @@ func (s *HTTPServerTemplates) apply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	orgID, err := influxdb.IDFromString(reqBody.OrgID)
+	orgID, err := platform.IDFromString(reqBody.OrgID)
 	if err != nil {
-		s.api.Err(w, r, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		s.api.Err(w, r, &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  fmt.Sprintf("invalid organization ID provided: %q", reqBody.OrgID),
 		})
 		return
 	}
 
-	var stackID influxdb.ID
+	// Reject use of server-side jsonnet with /api/v2/templates/apply
+	if encoding == EncodingJsonnet {
+		s.api.Err(w, r, &errors.Error{
+			Code: errors.EUnprocessableEntity,
+			Msg:  fmt.Sprintf("template from source(s) had an issue: %s", ErrInvalidEncoding.Error()),
+		})
+		return
+	}
+
+	var remotes []string
+	for _, rem := range reqBody.Remotes {
+		remotes = append(remotes, rem.URL)
+	}
+	remotes = append(remotes, reqBody.RawTemplate.Sources...)
+
+	for _, rem := range remotes {
+		// While things like '.%6Aonnet' evaluate to the default encoding (yaml), let's unescape and catch those too
+		decoded, err := url.QueryUnescape(rem)
+		if err != nil {
+			s.api.Err(w, r, &errors.Error{
+				Code: errors.EInvalid,
+				Msg:  fmt.Sprintf("template from url[%q] had an issue", rem),
+			})
+			return
+		}
+		if len(decoded) > 0 && strings.HasSuffix(strings.ToLower(decoded), "jsonnet") {
+			s.api.Err(w, r, &errors.Error{
+				Code: errors.EUnprocessableEntity,
+				Msg:  fmt.Sprintf("template from url[%q] had an issue: %s", rem, ErrInvalidEncoding.Error()),
+			})
+			return
+		}
+	}
+
+	var stackID platform.ID
 	if reqBody.StackID != nil {
 		if err := stackID.DecodeFromString(*reqBody.StackID); err != nil {
-			s.api.Err(w, r, &influxdb.Error{
-				Code: influxdb.EInvalid,
+			s.api.Err(w, r, &errors.Error{
+				Code: errors.EInvalid,
 				Msg:  fmt.Sprintf("invalid stack ID provided: %q", *reqBody.StackID),
 			})
 			return
 		}
 	}
 
-	parsedTemplate, err := reqBody.Templates(encoding)
+	parsedTemplate, err := reqBody.Templates(encoding, s.client)
 	if err != nil {
-		s.api.Err(w, r, &influxdb.Error{
-			Code: influxdb.EUnprocessableEntity,
+		s.api.Err(w, r, &errors.Error{
+			Code: errors.EUnprocessableEntity,
 			Err:  err,
 		})
 		return
@@ -379,7 +425,11 @@ func (s *HTTPServerTemplates) apply(w http.ResponseWriter, r *http.Request) {
 	if reqBody.DryRun {
 		impact, err := s.svc.DryRun(r.Context(), *orgID, userID, applyOpts...)
 		if IsParseErr(err) {
-			s.api.Respond(w, r, http.StatusUnprocessableEntity, impactToRespApply(impact, err))
+			s.api.Respond(w, r, http.StatusUnprocessableEntity, RespApplyErr{
+				RespApply: impactToRespApply(impact, err),
+				Code:      errors.EUnprocessableEntity,
+				Message:   "unprocessable entity",
+			})
 			return
 		}
 		if err != nil {
@@ -405,9 +455,9 @@ func (s *HTTPServerTemplates) apply(w http.ResponseWriter, r *http.Request) {
 func (s *HTTPServerTemplates) encResp(w http.ResponseWriter, r *http.Request, enc encoder, code int, res interface{}) {
 	w.WriteHeader(code)
 	if err := enc.Encode(res); err != nil {
-		s.api.Err(w, r, &influxdb.Error{
+		s.api.Err(w, r, &errors.Error{
 			Msg:  fmt.Sprintf("unable to marshal; Err: %v", err),
-			Code: influxdb.EInternal,
+			Code: errors.EInternal,
 			Err:  err,
 		})
 	}
@@ -558,10 +608,10 @@ func convertParseErr(err error) []ValidationErr {
 	return pErr.ValidationErrs()
 }
 
-func newDecodeErr(encoding string, err error) *influxdb.Error {
-	return &influxdb.Error{
+func newDecodeErr(encoding string, err error) *errors.Error {
+	return &errors.Error{
 		Msg:  fmt.Sprintf("unable to unmarshal %s", encoding),
-		Code: influxdb.EInvalid,
+		Code: errors.EInvalid,
 		Err:  err,
 	}
 }

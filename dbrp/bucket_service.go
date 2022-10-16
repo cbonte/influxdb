@@ -4,16 +4,17 @@ import (
 	"context"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"go.uber.org/zap"
 )
 
 type BucketService struct {
 	influxdb.BucketService
 	Logger             *zap.Logger
-	DBRPMappingService influxdb.DBRPMappingServiceV2
+	DBRPMappingService influxdb.DBRPMappingService
 }
 
-func NewBucketService(logger *zap.Logger, bucketService influxdb.BucketService, dbrpService influxdb.DBRPMappingServiceV2) *BucketService {
+func NewBucketService(logger *zap.Logger, bucketService influxdb.BucketService, dbrpService influxdb.DBRPMappingService) *BucketService {
 	return &BucketService{
 		Logger:             logger,
 		BucketService:      bucketService,
@@ -21,7 +22,7 @@ func NewBucketService(logger *zap.Logger, bucketService influxdb.BucketService, 
 	}
 }
 
-func (s *BucketService) DeleteBucket(ctx context.Context, id influxdb.ID) error {
+func (s *BucketService) DeleteBucket(ctx context.Context, id platform.ID) error {
 	bucket, err := s.BucketService.FindBucketByID(ctx, id)
 	if err != nil {
 		return err
@@ -31,7 +32,7 @@ func (s *BucketService) DeleteBucket(ctx context.Context, id influxdb.ID) error 
 	}
 
 	logger := s.Logger.With(zap.String("bucket_id", id.String()))
-	mappings, _, err := s.DBRPMappingService.FindMany(ctx, influxdb.DBRPMappingFilterV2{
+	mappings, _, err := s.DBRPMappingService.FindMany(ctx, influxdb.DBRPMappingFilter{
 		OrgID:    &bucket.OrgID,
 		BucketID: &bucket.ID,
 	})

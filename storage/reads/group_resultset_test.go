@@ -6,11 +6,11 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-
 	"github.com/influxdata/influxdb/v2/models"
 	"github.com/influxdata/influxdb/v2/pkg/data/gen"
 	"github.com/influxdata/influxdb/v2/storage/reads"
 	"github.com/influxdata/influxdb/v2/storage/reads/datatypes"
+	"github.com/influxdata/influxdb/v2/tsdb/cursors"
 )
 
 func TestNewGroupResultSet_Sorting(t *testing.T) {
@@ -32,7 +32,7 @@ func TestNewGroupResultSet_Sorting(t *testing.T) {
 					"cpu,tag0=val01,tag1=val11",
 					"cpu,tag0=val01,tag1=val12",
 				)},
-			group: datatypes.GroupBy,
+			group: datatypes.ReadGroupRequest_GroupBy,
 			keys:  []string{"tag1"},
 			exp: `group:
   tag key      : _m,tag0,tag1
@@ -61,7 +61,7 @@ group:
 					"cpu,tag0=0001,tag1=11",
 					"cpu,tag0=00011,tag1=1",
 				)},
-			group: datatypes.GroupBy,
+			group: datatypes.ReadGroupRequest_GroupBy,
 			keys:  []string{"tag0", "tag1"},
 			exp: `group:
   tag key      : _m,tag0,tag1
@@ -93,7 +93,7 @@ group:
 					"cpu,tag0=a*,tag1=b",
 					"cpu,tag0=a*",
 				)},
-			group: datatypes.GroupBy,
+			group: datatypes.ReadGroupRequest_GroupBy,
 			keys:  []string{"tag0", "tag1"},
 			exp: `group:
   tag key      : _m,tag0,tag1
@@ -116,7 +116,7 @@ group:
 					"cpu,tag0=a,tag1=b",
 					"cpu,tag1=b",
 				)},
-			group: datatypes.GroupBy,
+			group: datatypes.ReadGroupRequest_GroupBy,
 			keys:  []string{"tag0", "tag1"},
 			exp: `group:
   tag key      : _m,tag0,tag1
@@ -141,7 +141,7 @@ group:
 					"cpu,tag0=val01,tag1=val11",
 					"cpu,tag0=val01,tag1=val12",
 				)},
-			group: datatypes.GroupBy,
+			group: datatypes.ReadGroupRequest_GroupBy,
 			keys:  []string{"tag1"},
 			exp: `group:
   tag key      : _m,tag0,tag1
@@ -178,7 +178,7 @@ group:
 					"mem,tag1=val11,tag2=val20",
 					"mem,tag1=val11,tag2=val21",
 				)},
-			group: datatypes.GroupBy,
+			group: datatypes.ReadGroupRequest_GroupBy,
 			keys:  []string{"tag2", "tag1"},
 			exp: `group:
   tag key      : _m,tag1,tag2
@@ -224,7 +224,7 @@ group:
 					"mem,tag1=val11,tag2=val20",
 					"mem,tag1=val11,tag2=val21",
 				)},
-			group: datatypes.GroupBy,
+			group: datatypes.ReadGroupRequest_GroupBy,
 			keys:  []string{"tag0", "tag2"},
 			exp: `group:
   tag key      : _m,tag0,tag1
@@ -265,7 +265,7 @@ group:
 				// TODO(jlapacik):
 				//     Hints is not used except for the tests in this file.
 				//     Eventually this field should be removed entirely.
-				Hints: hints,
+				Hints: uint32(hints),
 			}, newCursor)
 
 			sb := new(strings.Builder)
@@ -287,7 +287,7 @@ func TestNewGroupResultSet_GroupNone_NoDataReturnsNil(t *testing.T) {
 			)}, nil
 	}
 
-	rs := reads.NewGroupResultSet(context.Background(), &datatypes.ReadGroupRequest{Group: datatypes.GroupNone}, newCursor)
+	rs := reads.NewGroupResultSet(context.Background(), &datatypes.ReadGroupRequest{Group: datatypes.ReadGroupRequest_GroupNone}, newCursor)
 	if rs != nil {
 		t.Errorf("expected nil cursor")
 	}
@@ -302,7 +302,7 @@ func TestNewGroupResultSet_GroupBy_NoDataReturnsNil(t *testing.T) {
 			)}, nil
 	}
 
-	rs := reads.NewGroupResultSet(context.Background(), &datatypes.ReadGroupRequest{Group: datatypes.GroupBy, GroupKeys: []string{"tag0"}}, newCursor)
+	rs := reads.NewGroupResultSet(context.Background(), &datatypes.ReadGroupRequest{Group: datatypes.ReadGroupRequest_GroupBy, GroupKeys: []string{"tag0"}}, newCursor)
 	if rs != nil {
 		t.Errorf("expected nil cursor")
 	}
@@ -386,12 +386,12 @@ group:
 			var hints datatypes.HintFlags
 			hints.SetHintSchemaAllTime()
 			rs := reads.NewGroupResultSet(context.Background(), &datatypes.ReadGroupRequest{
-				Group:     datatypes.GroupBy,
+				Group:     datatypes.ReadGroupRequest_GroupBy,
 				GroupKeys: tt.keys,
 				// TODO(jlapacik):
 				//     Hints is not used except for the tests in this file.
 				//     Eventually this field should be removed entirely.
-				Hints: hints,
+				Hints: uint32(hints),
 			}, newCursor, tt.opts...)
 
 			sb := new(strings.Builder)
@@ -459,7 +459,45 @@ func BenchmarkNewGroupResultSet_GroupBy(b *testing.B) {
 	hints.SetHintSchemaAllTime()
 
 	for i := 0; i < b.N; i++ {
-		rs := reads.NewGroupResultSet(context.Background(), &datatypes.ReadGroupRequest{Group: datatypes.GroupBy, GroupKeys: []string{"tag2"}, Hints: hints}, newCursor)
+		rs := reads.NewGroupResultSet(context.Background(), &datatypes.ReadGroupRequest{Group: datatypes.ReadGroupRequest_GroupBy, GroupKeys: []string{"tag2"}, Hints: uint32(hints)}, newCursor)
 		rs.Close()
+	}
+}
+
+func TestNewGroupResultSet_TimeRange(t *testing.T) {
+	newCursor := newMockReadCursor(
+		"clicks click=1 1",
+	)
+	for i := range newCursor.rows {
+		newCursor.rows[0].Query[i] = &mockCursorIterator{
+			newCursorFn: func(req *cursors.CursorRequest) cursors.Cursor {
+				if want, got := int64(0), req.StartTime; want != got {
+					t.Errorf("unexpected start time -want/+got:\n\t- %d\n\t+ %d", want, got)
+				}
+				if want, got := int64(29), req.EndTime; want != got {
+					t.Errorf("unexpected end time -want/+got:\n\t- %d\n\t+ %d", want, got)
+				}
+				return &mockIntegerArrayCursor{}
+			},
+		}
+	}
+
+	ctx := context.Background()
+	req := datatypes.ReadGroupRequest{
+		Range: &datatypes.TimestampRange{
+			Start: 0,
+			End:   30,
+		},
+	}
+
+	resultSet := reads.NewGroupResultSet(ctx, &req, func() (reads.SeriesCursor, error) {
+		return &newCursor, nil
+	})
+	groupByCursor := resultSet.Next()
+	if groupByCursor == nil {
+		t.Fatal("unexpected: groupByCursor was nil")
+	}
+	if groupByCursor.Next() {
+		t.Fatal("unexpected: groupByCursor.Next should not have advanced")
 	}
 }

@@ -9,19 +9,19 @@ import (
 	"strings"
 
 	"github.com/dustin/go-humanize"
+	"github.com/influxdata/influx-cli/v2/clients"
 	"github.com/influxdata/influxdb/v2"
-	"github.com/influxdata/influxdb/v2/cmd/internal"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/pkg/fs"
 	"github.com/influxdata/influxdb/v2/v1/services/meta"
-	"github.com/tcnksm/go-input"
 	"go.uber.org/zap"
 )
 
 // upgradeDatabases creates databases, buckets, retention policies and shard info according to 1.x meta and copies data
-func upgradeDatabases(ctx context.Context, ui *input.UI, v1 *influxDBv1, v2 *influxDBv2, opts *options, orgID influxdb.ID, log *zap.Logger) (map[string][]influxdb.ID, error) {
+func upgradeDatabases(ctx context.Context, cli clients.CLI, v1 *influxDBv1, v2 *influxDBv2, opts *options, orgID platform.ID, log *zap.Logger) (map[string][]platform.ID, error) {
 	v1opts := opts.source
 	v2opts := opts.target
-	db2BucketIds := make(map[string][]influxdb.ID)
+	db2BucketIds := make(map[string][]platform.ID)
 
 	targetDataPath := filepath.Join(v2opts.enginePath, "data")
 	targetWalPath := filepath.Join(v2opts.enginePath, "wal")
@@ -38,7 +38,7 @@ func upgradeDatabases(ctx context.Context, ui *input.UI, v1 *influxDBv1, v2 *inf
 		log.Info("No database found in the 1.x meta")
 		return db2BucketIds, nil
 	}
-	if err := checkDiskSpace(ui, opts, log); err != nil {
+	if err := checkDiskSpace(cli, opts, log); err != nil {
 		return nil, err
 	}
 
@@ -61,7 +61,7 @@ func upgradeDatabases(ctx context.Context, ui *input.UI, v1 *influxDBv1, v2 *inf
 		log.Debug("Upgrading database", zap.String("database", db.Name))
 
 		// db to buckets IDs mapping
-		db2BucketIds[db.Name] = make([]influxdb.ID, 0, len(db.RetentionPolicies))
+		db2BucketIds[db.Name] = make([]platform.ID, 0, len(db.RetentionPolicies))
 
 		for _, rp := range db.RetentionPolicies {
 			sourcePath := filepath.Join(v1opts.dataDir, db.Name, rp.Name)
@@ -73,6 +73,7 @@ func upgradeDatabases(ctx context.Context, ui *input.UI, v1 *influxDBv1, v2 *inf
 				Description:         fmt.Sprintf("Upgraded from v1 database %s with retention policy %s", db.Name, rp.Name),
 				RetentionPolicyName: rp.Name,
 				RetentionPeriod:     rp.Duration,
+				ShardGroupDuration:  rp.ShardGroupDuration,
 			}
 			log.Debug("Creating bucket", zap.String("Bucket", bucket.Name))
 			err = v2.bucketSvc.CreateBucket(ctx, bucket)
@@ -90,14 +91,14 @@ func upgradeDatabases(ctx context.Context, ui *input.UI, v1 *influxDBv1, v2 *inf
 				return nil, fmt.Errorf("error creating database %s: %w", bucket.ID.String(), err)
 			}
 
-			mapping := &influxdb.DBRPMappingV2{
+			mapping := &influxdb.DBRPMapping{
 				Database:        db.Name,
 				RetentionPolicy: rp.Name,
 				Default:         db.DefaultRetentionPolicy == rp.Name,
 				OrganizationID:  orgID,
 				BucketID:        bucket.ID,
 			}
-			log.Debug(
+			log.Info(
 				"Creating mapping",
 				zap.String("database", mapping.Database),
 				zap.String("retention policy", mapping.RetentionPolicy),
@@ -154,7 +155,7 @@ func upgradeDatabases(ctx context.Context, ui *input.UI, v1 *influxDBv1, v2 *inf
 					return nil, fmt.Errorf("error copying v1 data from %s to %s: %w", sourcePath, targetPath, err)
 				}
 			} else {
-				log.Warn("Empty retention policy")
+				log.Warn("Empty retention policy, no shards found", zap.String("source", sourcePath))
 			}
 		}
 
@@ -191,12 +192,13 @@ func upgradeDatabases(ctx context.Context, ui *input.UI, v1 *influxDBv1, v2 *inf
 		}
 	}
 
+	log.Info("Database upgrade complete", zap.Int("upgraded_count", len(db2BucketIds)))
 	return db2BucketIds, nil
 }
 
 // checkDiskSpace ensures there is enough room at the target path to store
 // a full copy of all V1 data.
-func checkDiskSpace(ui *input.UI, opts *options, log *zap.Logger) error {
+func checkDiskSpace(cli clients.CLI, opts *options, log *zap.Logger) error {
 	log.Info("Checking available disk space")
 
 	size, err := DirSize(opts.source.dataDir)
@@ -224,12 +226,10 @@ func checkDiskSpace(ui *input.UI, opts *options, log *zap.Logger) error {
 		return fmt.Errorf("not enough space on target disk of %s: need %d, available %d", v2dir, size, diskInfo.Free)
 	}
 	if !opts.force {
-		if confirmed := internal.GetConfirm(ui, func() string {
-			return fmt.Sprintf(`Proceeding will copy all V1 data to %q
+		if confirmed := cli.StdIO.GetConfirm(fmt.Sprintf(`Proceeding will copy all V1 data to %q
   Space available: %s
   Space required:  %s
-`, v2dir, freeBytes, requiredBytes)
-		}); !confirmed {
+`, v2dir, freeBytes, requiredBytes)); !confirmed {
 			return errors.New("upgrade was canceled")
 		}
 	}

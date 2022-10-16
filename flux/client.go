@@ -4,12 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"time"
-
-	"github.com/influxdata/influxdb/v2/chronograf"
 )
 
 // Shared transports for all clients to prevent leaking connections.
@@ -49,7 +47,7 @@ func (c *Client) pingTimeout(ctx context.Context) error {
 	case resp := <-resps:
 		return resp
 	case <-ctx.Done():
-		return chronograf.ErrUpstreamTimeout
+		return fmt.Errorf("request to backend timed out")
 	}
 }
 
@@ -74,7 +72,7 @@ func (c *Client) ping(u *url.URL) error {
 	}
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return err
 	}

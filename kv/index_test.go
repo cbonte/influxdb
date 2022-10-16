@@ -3,7 +3,6 @@ package kv_test
 import (
 	"context"
 	"errors"
-	"io/ioutil"
 	"os"
 	"testing"
 
@@ -19,20 +18,12 @@ import (
 )
 
 func Test_Inmem_Index(t *testing.T) {
-	s, closeStore, err := NewTestInmemStore(t)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeStore()
-
+	s := influxdbtesting.NewTestInmemStore(t)
 	influxdbtesting.TestIndex(t, s)
 }
 
 func Test_Bolt_Index(t *testing.T) {
-	s, closeBolt, err := NewTestBoltStore(t)
-	if err != nil {
-		t.Fatalf("failed to create new kv store: %v", err)
-	}
+	s, closeBolt := influxdbtesting.NewTestBoltStore(t)
 	defer closeBolt()
 
 	influxdbtesting.TestIndex(t, s)
@@ -185,7 +176,7 @@ func Benchmark_Inmem_Index_Walk(b *testing.B) {
 }
 
 func Benchmark_Bolt_Index_Walk(b *testing.B) {
-	f, err := ioutil.TempFile("", "influxdata-bolt-")
+	f, err := os.CreateTemp("", "influxdata-bolt-")
 	if err != nil {
 		b.Fatal(errors.New("unable to open temporary boltdb file"))
 	}

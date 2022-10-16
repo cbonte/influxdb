@@ -5,10 +5,8 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	nethttp "net/http"
-	_ "net/http/pprof" // needed to add pprof to our binary.
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,12 +14,17 @@ import (
 	"time"
 
 	"github.com/influxdata/flux"
+	"github.com/influxdata/flux/dependencies/testing"
+	"github.com/influxdata/flux/dependencies/url"
+	"github.com/influxdata/flux/execute/executetest"
 	platform "github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/annotations"
+	annotationTransport "github.com/influxdata/influxdb/v2/annotations/transport"
 	"github.com/influxdata/influxdb/v2/authorization"
 	"github.com/influxdata/influxdb/v2/authorizer"
+	"github.com/influxdata/influxdb/v2/backup"
 	"github.com/influxdata/influxdb/v2/bolt"
 	"github.com/influxdata/influxdb/v2/checks"
-	"github.com/influxdata/influxdb/v2/chronograf/server"
 	"github.com/influxdata/influxdb/v2/dashboards"
 	dashboardTransport "github.com/influxdata/influxdb/v2/dashboards/transport"
 	"github.com/influxdata/influxdb/v2/dbrp"
@@ -34,6 +37,7 @@ import (
 	"github.com/influxdata/influxdb/v2/kit/feature"
 	overrideflagger "github.com/influxdata/influxdb/v2/kit/feature/override"
 	"github.com/influxdata/influxdb/v2/kit/metric"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kit/prom"
 	"github.com/influxdata/influxdb/v2/kit/tracing"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
@@ -41,7 +45,8 @@ import (
 	"github.com/influxdata/influxdb/v2/kv/migration"
 	"github.com/influxdata/influxdb/v2/kv/migration/all"
 	"github.com/influxdata/influxdb/v2/label"
-	"github.com/influxdata/influxdb/v2/nats"
+	"github.com/influxdata/influxdb/v2/notebooks"
+	notebookTransport "github.com/influxdata/influxdb/v2/notebooks/transport"
 	endpointservice "github.com/influxdata/influxdb/v2/notification/endpoint/service"
 	ruleservice "github.com/influxdata/influxdb/v2/notification/rule/service"
 	"github.com/influxdata/influxdb/v2/pkger"
@@ -50,10 +55,16 @@ import (
 	"github.com/influxdata/influxdb/v2/query/control"
 	"github.com/influxdata/influxdb/v2/query/fluxlang"
 	"github.com/influxdata/influxdb/v2/query/stdlib/influxdata/influxdb"
+	"github.com/influxdata/influxdb/v2/remotes"
+	remotesTransport "github.com/influxdata/influxdb/v2/remotes/transport"
+	"github.com/influxdata/influxdb/v2/replications"
+	replicationTransport "github.com/influxdata/influxdb/v2/replications/transport"
 	"github.com/influxdata/influxdb/v2/secret"
 	"github.com/influxdata/influxdb/v2/session"
 	"github.com/influxdata/influxdb/v2/snowflake"
 	"github.com/influxdata/influxdb/v2/source"
+	"github.com/influxdata/influxdb/v2/sqlite"
+	sqliteMigrations "github.com/influxdata/influxdb/v2/sqlite/migrations"
 	"github.com/influxdata/influxdb/v2/storage"
 	storageflux "github.com/influxdata/influxdb/v2/storage/flux"
 	"github.com/influxdata/influxdb/v2/storage/readservice"
@@ -62,11 +73,16 @@ import (
 	"github.com/influxdata/influxdb/v2/task/backend/executor"
 	"github.com/influxdata/influxdb/v2/task/backend/middleware"
 	"github.com/influxdata/influxdb/v2/task/backend/scheduler"
+	"github.com/influxdata/influxdb/v2/task/taskmodel"
 	telegrafservice "github.com/influxdata/influxdb/v2/telegraf/service"
 	"github.com/influxdata/influxdb/v2/telemetry"
 	"github.com/influxdata/influxdb/v2/tenant"
-	_ "github.com/influxdata/influxdb/v2/tsdb/engine/tsm1" // needed for tsm1
-	_ "github.com/influxdata/influxdb/v2/tsdb/index/tsi1"  // needed for tsi1
+
+	// needed for tsm1
+	_ "github.com/influxdata/influxdb/v2/tsdb/engine/tsm1"
+
+	// needed for tsi1
+	_ "github.com/influxdata/influxdb/v2/tsdb/index/tsi1"
 	authv1 "github.com/influxdata/influxdb/v2/v1/authorization"
 	iqlcoordinator "github.com/influxdata/influxdb/v2/v1/coordinator"
 	"github.com/influxdata/influxdb/v2/v1/services/meta"
@@ -80,7 +96,9 @@ import (
 )
 
 const (
-	// BoltStore stores all REST resources in boltdb.
+	// DiskStore stores all REST resources to disk in boltdb and sqlite.
+	DiskStore = "disk"
+	// BoltStore also stores all REST resources to disk in boltdb and sqlite. Kept for backwards-compatibility.
 	BoltStore = "bolt"
 	// MemoryStore stores all REST resources in memory (useful for testing).
 	MemoryStore = "memory"
@@ -91,16 +109,24 @@ const (
 	JaegerTracing = "jaeger"
 )
 
+type labeledCloser struct {
+	label  string
+	closer func(context.Context) error
+}
+
 // Launcher represents the main program execution.
 type Launcher struct {
-	wg     sync.WaitGroup
-	cancel func()
+	wg       sync.WaitGroup
+	cancel   func()
+	doneChan <-chan struct{}
+	closers  []labeledCloser
+	flushers flushers
 
 	flagger feature.Flagger
 
-	boltClient *bolt.Client
-	kvStore    kv.SchemaStore
-	kvService  *kv.Service
+	kvStore   kv.Store
+	kvService *kv.Service
+	sqlStore  *sqlite.SqlStore
 
 	// storage engine
 	engine Engine
@@ -109,18 +135,13 @@ type Launcher struct {
 	queryController *control.Controller
 
 	httpPort   int
-	httpServer *nethttp.Server
+	tlsEnabled bool
 
-	natsServer *nats.Server
-	natsPort   int
+	scheduler stoppingScheduler
+	executor  *executor.Executor
 
-	scheduler          stoppingScheduler
-	executor           *executor.Executor
-	taskControlService taskbackend.TaskControlService
-
-	jaegerTracerCloser io.Closer
-	log                *zap.Logger
-	reg                *prom.Registry
+	log *zap.Logger
+	reg *prom.Registry
 
 	apibackend *http.APIBackend
 }
@@ -142,16 +163,6 @@ func (m *Launcher) Registry() *prom.Registry {
 	return m.reg
 }
 
-// URL returns the URL to connect to the HTTP server.
-func (m *Launcher) URL() string {
-	return fmt.Sprintf("http://127.0.0.1:%d", m.httpPort)
-}
-
-// NatsURL returns the URL to connection to the NATS server.
-func (m *Launcher) NatsURL() string {
-	return fmt.Sprintf("http://127.0.0.1:%d", m.natsPort)
-}
-
 // Engine returns a reference to the storage engine. It should only be called
 // for end-to-end testing purposes.
 func (m *Launcher) Engine() Engine {
@@ -162,44 +173,17 @@ func (m *Launcher) Engine() Engine {
 func (m *Launcher) Shutdown(ctx context.Context) error {
 	var errs []string
 
-	if err := m.httpServer.Shutdown(ctx); err != nil {
-		m.log.Error("Failed to close HTTP server", zap.Error(err))
-		errs = append(errs, err.Error())
-	}
-
-	m.log.Info("Stopping", zap.String("service", "task"))
-
-	m.scheduler.Stop()
-
-	m.log.Info("Stopping", zap.String("service", "nats"))
-	m.natsServer.Close()
-
-	m.log.Info("Stopping", zap.String("service", "bolt"))
-	if err := m.boltClient.Close(); err != nil {
-		m.log.Error("Failed closing bolt", zap.Error(err))
-		errs = append(errs, err.Error())
-	}
-
-	m.log.Info("Stopping", zap.String("service", "query"))
-	if err := m.queryController.Shutdown(ctx); err != nil && err != context.Canceled {
-		m.log.Error("Failed closing query service", zap.Error(err))
-		errs = append(errs, err.Error())
-	}
-
-	m.log.Info("Stopping", zap.String("service", "storage-engine"))
-	if err := m.engine.Close(); err != nil {
-		m.log.Error("Failed to close engine", zap.Error(err))
-		errs = append(errs, err.Error())
-	}
-
-	m.wg.Wait()
-
-	if m.jaegerTracerCloser != nil {
-		if err := m.jaegerTracerCloser.Close(); err != nil {
-			m.log.Error("Failed to closer Jaeger tracer", zap.Error(err))
+	// Shut down subsystems in the reverse order of their registration.
+	for i := len(m.closers); i > 0; i-- {
+		lc := m.closers[i-1]
+		m.log.Info("Stopping subsystem", zap.String("subsystem", lc.label))
+		if err := lc.closer(ctx); err != nil {
+			m.log.Error("Failed to stop subsystem", zap.String("subsystem", lc.label), zap.Error(err))
 			errs = append(errs, err.Error())
 		}
 	}
+
+	m.wg.Wait()
 
 	// N.B. We ignore any errors here because Sync is known to fail with EINVAL
 	// when logging to Stdout on certain OS's.
@@ -214,97 +198,65 @@ func (m *Launcher) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// Cancel executes the context cancel on the program. Used for testing.
-func (m *Launcher) Cancel() { m.cancel() }
+func (m *Launcher) Done() <-chan struct{} {
+	return m.doneChan
+}
 
 func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 	span, ctx := tracing.StartSpanFromContext(ctx)
 	defer span.Finish()
 
 	ctx, m.cancel = context.WithCancel(ctx)
+	m.doneChan = ctx.Done()
 
 	info := platform.GetBuildInfo()
 	m.log.Info("Welcome to InfluxDB",
 		zap.String("version", info.Version),
 		zap.String("commit", info.Commit),
 		zap.String("build_date", info.Date),
+		zap.String("log_level", opts.LogLevel.String()),
 	)
+	m.initTracing(opts)
 
-	switch opts.TracingType {
-	case LogTracing:
-		m.log.Info("Tracing via zap logging")
-		tracer := pzap.NewTracer(m.log, snowflake.NewIDGenerator())
-		opentracing.SetGlobalTracer(tracer)
-
-	case JaegerTracing:
-		m.log.Info("Tracing via Jaeger")
-		cfg, err := jaegerconfig.FromEnv()
-		if err != nil {
-			m.log.Error("Failed to get Jaeger client config from environment variables", zap.Error(err))
-			break
-		}
-		tracer, closer, err := cfg.NewTracer()
-		if err != nil {
-			m.log.Error("Failed to instantiate Jaeger tracer", zap.Error(err))
-			break
-		}
-		opentracing.SetGlobalTracer(tracer)
-		m.jaegerTracerCloser = closer
+	if p := opts.Viper.ConfigFileUsed(); p != "" {
+		m.log.Debug("loaded config file", zap.String("path", p))
 	}
 
-	m.boltClient = bolt.NewClient(m.log.With(zap.String("service", "bolt")))
-	m.boltClient.Path = opts.BoltPath
-
-	if err := m.boltClient.Open(ctx); err != nil {
-		m.log.Error("Failed opening bolt", zap.Error(err))
-		return err
+	if opts.NatsPort != 0 {
+		m.log.Warn("nats-port argument is deprecated and unused")
 	}
 
-	var flushers flushers
-	switch opts.StoreType {
-	case BoltStore:
-		store := bolt.NewKVStore(m.log.With(zap.String("service", "kvstore-bolt")), opts.BoltPath)
-		store.WithDB(m.boltClient.DB())
-		m.kvStore = store
-		if opts.Testing {
-			flushers = append(flushers, store)
+	if opts.NatsMaxPayloadBytes != 0 {
+		m.log.Warn("nats-max-payload-bytes argument is deprecated and unused")
+	}
+
+	// Parse feature flags.
+	// These flags can be used to modify the remaining setup logic in this method.
+	// They will also be injected into the contexts of incoming HTTP requests at runtime,
+	// for use in modifying behavior there.
+	if m.flagger == nil {
+		m.flagger = feature.DefaultFlagger()
+		if len(opts.FeatureFlags) > 0 {
+			f, err := overrideflagger.Make(opts.FeatureFlags, feature.ByKey)
+			if err != nil {
+				m.log.Error("Failed to configure feature flag overrides",
+					zap.Error(err), zap.Any("overrides", opts.FeatureFlags))
+				return err
+			}
+			m.log.Info("Running with feature flag overrides", zap.Any("overrides", opts.FeatureFlags))
+			m.flagger = f
 		}
-
-	case MemoryStore:
-		store := inmem.NewKVStore()
-		m.kvStore = store
-		if opts.Testing {
-			flushers = append(flushers, store)
-		}
-
-	default:
-		err := fmt.Errorf("unknown store type %s; expected bolt or memory", opts.StoreType)
-		m.log.Error("Failed opening bolt", zap.Error(err))
-		return err
-	}
-
-	migrator, err := migration.NewMigrator(
-		m.log.With(zap.String("service", "migrations")),
-		m.kvStore,
-		all.Migrations[:]...,
-	)
-	if err != nil {
-		m.log.Error("Failed to initialize kv migrator", zap.Error(err))
-		return err
-	}
-
-	// apply migrations to metadata store
-	if err := migrator.Up(ctx); err != nil {
-		m.log.Error("Failed to apply migrations", zap.Error(err))
-		return err
 	}
 
 	m.reg = prom.NewRegistry(m.log.With(zap.String("service", "prom_registry")))
-	m.reg.MustRegister(
-		prometheus.NewGoCollector(),
-		infprom.NewInfluxCollector(m.boltClient, info),
-	)
-	m.reg.MustRegister(m.boltClient)
+	m.reg.MustRegister(prometheus.NewGoCollector())
+
+	// Open KV and SQL stores.
+	procID, err := m.openMetaStores(ctx, opts)
+	if err != nil {
+		return err
+	}
+	m.reg.MustRegister(infprom.NewInfluxCollector(procID, info))
 
 	tenantStore := tenant.NewStore(m.kvStore)
 	ts := tenant.NewSystem(tenantStore, m.log.With(zap.String("store", "new")), m.reg, metric.WithSuffix("new"))
@@ -339,7 +291,7 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 
 	secretStore, err := secret.NewStore(m.kvStore)
 	if err != nil {
-		m.log.Error("Failed creating new meta store", zap.Error(err))
+		m.log.Error("Failed creating new secret store", zap.Error(err))
 		return err
 	}
 
@@ -363,12 +315,6 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		return err
 	}
 
-	chronografSvc, err := server.NewServiceV2(ctx, m.boltClient.DB())
-	if err != nil {
-		m.log.Error("Failed creating chronograf service", zap.Error(err))
-		return err
-	}
-
 	metaClient := meta.NewClient(meta.NewConfig(), m.kvStore)
 	if err := metaClient.Open(); err != nil {
 		m.log.Error("Failed to open meta client", zap.Error(err))
@@ -381,7 +327,7 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 			opts.StorageConfig,
 			storage.WithMetaClient(metaClient),
 		)
-		flushers = append(flushers, engine)
+		m.flushers = append(m.flushers, engine)
 		m.engine = engine
 	} else {
 		// check for 2.x data / state from a prior 2.x
@@ -392,6 +338,7 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		m.engine = storage.NewEngine(
 			opts.EnginePath,
 			opts.StorageConfig,
+			storage.WithMetricsDisabled(opts.MetricsDisabled),
 			storage.WithMetaClient(metaClient),
 		)
 	}
@@ -400,6 +347,12 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		m.log.Error("Failed to open engine", zap.Error(err))
 		return err
 	}
+	m.closers = append(m.closers, labeledCloser{
+		label: "engine",
+		closer: func(context.Context) error {
+			return m.engine.Close()
+		},
+	})
 	// The Engine's metrics must be registered after it opens.
 	m.reg.MustRegister(m.engine.PrometheusCollectors()...)
 
@@ -410,17 +363,59 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		restoreService platform.RestoreService = m.engine
 	)
 
+	remotesSvc := remotes.NewService(m.sqlStore)
+	remotesServer := remotesTransport.NewInstrumentedRemotesHandler(
+		m.log.With(zap.String("handler", "remotes")), m.reg, m.kvStore, remotesSvc)
+
+	replicationSvc, replicationsMetrics := replications.NewService(m.sqlStore, ts, pointsWriter, m.log.With(zap.String("service", "replications")), opts.EnginePath, opts.InstanceID)
+	replicationServer := replicationTransport.NewInstrumentedReplicationHandler(
+		m.log.With(zap.String("handler", "replications")), m.reg, m.kvStore, replicationSvc)
+	ts.BucketService = replications.NewBucketService(
+		m.log.With(zap.String("service", "replication_buckets")), ts.BucketService, replicationSvc)
+
+	m.reg.MustRegister(replicationsMetrics.PrometheusCollectors()...)
+
+	if err = replicationSvc.Open(ctx); err != nil {
+		m.log.Error("Failed to open replications service", zap.Error(err))
+		return err
+	}
+
+	m.closers = append(m.closers, labeledCloser{
+		label: "replications",
+		closer: func(context.Context) error {
+			return replicationSvc.Close()
+		},
+	})
+
+	pointsWriter = replicationSvc
+
+	// When --hardening-enabled, use an HTTP IP validator that restricts
+	// flux and pkger HTTP requests to private addressess.
+	var urlValidator url.Validator
+	if opts.HardeningEnabled {
+		urlValidator = url.PrivateIPValidator{}
+	} else {
+		urlValidator = url.PassValidator{}
+	}
+
 	deps, err := influxdb.NewDependencies(
 		storageflux.NewReader(storage2.NewStore(m.engine.TSDBStore(), m.engine.MetaClient())),
-		m.engine,
+		pointsWriter,
 		authorizer.NewBucketService(ts.BucketService),
 		authorizer.NewOrgService(ts.OrganizationService),
 		authorizer.NewSecretService(secretSvc),
 		nil,
+		influxdb.WithURLValidator(urlValidator),
 	)
 	if err != nil {
 		m.log.Error("Failed to get query controller dependencies", zap.Error(err))
 		return err
+	}
+
+	dependencyList := []flux.Dependency{deps}
+	if opts.Testing {
+		dependencyList = append(dependencyList, executetest.NewDefaultTestFlagger())
+		dependencyList = append(dependencyList, testing.FrameworkConfig{})
 	}
 
 	m.queryController, err = control.New(control.Config{
@@ -429,18 +424,24 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		MemoryBytesQuotaPerQuery:        opts.MemoryBytesQuotaPerQuery,
 		MaxMemoryBytes:                  opts.MaxMemoryBytes,
 		QueueSize:                       opts.QueueSize,
-		Logger:                          m.log.With(zap.String("service", "storage-reads")),
-		ExecutorDependencies:            []flux.Dependency{deps},
-	})
+		ExecutorDependencies:            dependencyList,
+		FluxLogEnabled:                  opts.FluxLogEnabled,
+	}, m.log.With(zap.String("service", "storage-reads")))
 	if err != nil {
 		m.log.Error("Failed to create query controller", zap.Error(err))
 		return err
 	}
+	m.closers = append(m.closers, labeledCloser{
+		label: "query",
+		closer: func(ctx context.Context) error {
+			return m.queryController.Shutdown(ctx)
+		},
+	})
 
 	m.reg.MustRegister(m.queryController.PrometheusCollectors()...)
 
 	var storageQueryService = readservice.NewProxyQueryService(m.queryController)
-	var taskSvc platform.TaskService
+	var taskSvc taskmodel.TaskService
 	{
 		// create the task stack
 		combinedTaskService := taskbackend.NewAnalyticalStorage(
@@ -460,6 +461,10 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 			combinedTaskService,
 			executor.WithFlagger(m.flagger),
 		)
+		err = executor.LoadExistingScheduleRuns(ctx)
+		if err != nil {
+			m.log.Fatal("could not load existing scheduled runs", zap.Error(err))
+		}
 		m.executor = executor
 		m.reg.MustRegister(executorMetrics.PrometheusCollectors()...)
 		schLogger := m.log.With(zap.String("service", "task-scheduler"))
@@ -476,7 +481,7 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 				scheduler.WithOnErrorFn(func(ctx context.Context, taskID scheduler.ID, scheduledAt time.Time, err error) {
 					schLogger.Info(
 						"error in scheduler run",
-						zap.String("taskID", platform.ID(taskID).String()),
+						zap.String("taskID", platform2.ID(taskID).String()),
 						zap.Time("scheduledAt", scheduledAt),
 						zap.Error(err))
 				}),
@@ -484,6 +489,13 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 			if err != nil {
 				m.log.Fatal("could not start task scheduler", zap.Error(err))
 			}
+			m.closers = append(m.closers, labeledCloser{
+				label: "task",
+				closer: func(context.Context) error {
+					sch.Stop()
+					return nil
+				},
+			})
 			m.reg.MustRegister(sm.PrometheusCollectors()...)
 		}
 
@@ -496,13 +508,12 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 			executor)
 
 		taskSvc = middleware.New(combinedTaskService, taskCoord)
-		m.taskControlService = combinedTaskService
 		if err := taskbackend.TaskNotifyCoordinatorOfExisting(
 			ctx,
 			taskSvc,
 			combinedTaskService,
 			taskCoord,
-			func(ctx context.Context, taskID platform.ID, runID platform.ID) error {
+			func(ctx context.Context, taskID platform2.ID, runID platform2.ID) error {
 				_, err := executor.ResumeCurrentRun(ctx, taskID, runID)
 				return err
 			},
@@ -570,62 +581,18 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		telegrafSvc = telegrafservice.New(m.kvStore)
 	}
 
-	// NATS streaming server
-	natsOpts := nats.NewDefaultServerOptions()
-	natsOpts.Port = nats.RandomPort
-	m.natsServer = nats.NewServer(&natsOpts)
-	if err := m.natsServer.Open(); err != nil {
-		m.log.Error("Failed to start nats streaming server", zap.Error(err))
-		return err
-	}
-	m.natsPort = natsOpts.Port // updated with random port
-	publisher := nats.NewAsyncPublisher(m.log, fmt.Sprintf("nats-publisher-%d", m.natsPort), m.NatsURL())
-	if err := publisher.Open(); err != nil {
-		m.log.Error("Failed to connect to streaming server", zap.Error(err))
-		return err
-	}
-
-	// TODO(jm): this is an example of using a subscriber to consume from the channel. It should be removed.
-	subscriber := nats.NewQueueSubscriber(fmt.Sprintf("nats-subscriber-%d", m.natsPort), m.NatsURL())
-	if err := subscriber.Open(); err != nil {
-		m.log.Error("Failed to connect to streaming server", zap.Error(err))
-		return err
-	}
-
-	subscriber.Subscribe(gather.MetricsSubject, "metrics", gather.NewRecorderHandler(m.log, gather.PointWriter{Writer: pointsWriter}))
-	scraperScheduler, err := gather.NewScheduler(m.log, 10, scraperTargetSvc, publisher, subscriber, 10*time.Second, 30*time.Second)
+	scraperScheduler, err := gather.NewScheduler(m.log.With(zap.String("service", "scraper")), 100, 10, scraperTargetSvc, pointsWriter, 10*time.Second)
 	if err != nil {
 		m.log.Error("Failed to create scraper subscriber", zap.Error(err))
 		return err
 	}
-
-	m.wg.Add(1)
-	go func(log *zap.Logger) {
-		defer m.wg.Done()
-		log = log.With(zap.String("service", "scraper"))
-		if err := scraperScheduler.Run(ctx); err != nil {
-			log.Error("Failed scraper service", zap.Error(err))
-		}
-		log.Info("Stopping")
-	}(m.log)
-
-	m.httpServer = &nethttp.Server{
-		Addr: opts.HttpBindAddress,
-	}
-
-	if m.flagger == nil {
-		m.flagger = feature.DefaultFlagger()
-		if len(opts.FeatureFlags) > 0 {
-			f, err := overrideflagger.Make(opts.FeatureFlags, feature.ByKey)
-			if err != nil {
-				m.log.Error("Failed to configure feature flag overrides",
-					zap.Error(err), zap.Any("overrides", opts.FeatureFlags))
-				return err
-			}
-			m.log.Info("Running with feature flag overrides", zap.Any("overrides", opts.FeatureFlags))
-			m.flagger = f
-		}
-	}
+	m.closers = append(m.closers, labeledCloser{
+		label: "scraper",
+		closer: func(ctx context.Context) error {
+			scraperScheduler.Close()
+			return nil
+		},
+	})
 
 	var sessionSvc platform.SessionService
 	{
@@ -653,6 +620,8 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 	ts.BucketService = storage.NewBucketService(m.log, ts.BucketService, m.engine)
 	ts.BucketService = dbrp.NewBucketService(m.log, ts.BucketService, dbrpSvc)
 
+	bucketManifestWriter := backup.NewBucketManifestWriter(ts, metaClient)
+
 	onboardingLogger := m.log.With(zap.String("handler", "onboard"))
 	onboardOpts := []tenant.OnboardServiceOptionFn{tenant.WithOnboardingLogger(onboardingLogger)}
 	if opts.TestingAlwaysAllowSetup {
@@ -665,9 +634,8 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 	onboardSvc = tenant.NewOnboardingLogger(onboardingLogger, onboardSvc)                 // with logging
 
 	var (
-		authorizerV1 platform.AuthorizerV1
-		passwordV1   platform.PasswordsService
-		authSvcV1    *authv1.Service
+		passwordV1 platform.PasswordsService
+		authSvcV1  *authv1.Service
 	)
 	{
 		authStore, err := authv1.NewStore(m.kvStore)
@@ -678,13 +646,6 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 
 		authSvcV1 = authv1.NewService(authStore, ts)
 		passwordV1 = authv1.NewCachingPasswordsService(authSvcV1)
-
-		authorizerV1 = &authv1.Authorizer{
-			AuthV1:   authSvcV1,
-			AuthV2:   authSvc,
-			Comparer: passwordV1,
-			User:     ts,
-		}
 	}
 
 	var (
@@ -716,24 +677,35 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		NotificationRuleFinder:     notificationRuleSvc,
 	}
 
+	errorHandler := kithttp.NewErrorHandler(m.log.With(zap.String("handler", "error_logger")))
 	m.apibackend = &http.APIBackend{
 		AssetsPath:           opts.AssetsPath,
-		HTTPErrorHandler:     kithttp.ErrorHandler(0),
+		UIDisabled:           opts.UIDisabled,
+		HTTPErrorHandler:     errorHandler,
 		Logger:               m.log,
+		FluxLogEnabled:       opts.FluxLogEnabled,
 		SessionRenewDisabled: opts.SessionRenewDisabled,
-		NewBucketService:     source.NewBucketService,
 		NewQueryService:      source.NewQueryService,
 		PointsWriter: &storage.LoggingPointsWriter{
 			Underlying:    pointsWriter,
 			BucketFinder:  ts.BucketService,
 			LogBucketName: platform.MonitoringSystemBucketName,
 		},
-		DeleteService:        deleteService,
-		BackupService:        backupService,
-		RestoreService:       restoreService,
-		AuthorizationService: authSvc,
-		AuthorizerV1:         authorizerV1,
-		AlgoWProxy:           &http.NoopProxyHandler{},
+		DeleteService:           deleteService,
+		BackupService:           backupService,
+		SqlBackupRestoreService: m.sqlStore,
+		BucketManifestWriter:    bucketManifestWriter,
+		RestoreService:          restoreService,
+		AuthorizationService:    authSvc,
+		AuthorizationV1Service:  authSvcV1,
+		PasswordV1Service:       passwordV1,
+		AuthorizerV1: &authv1.Authorizer{
+			AuthV1:   authSvcV1,
+			AuthV2:   authSvc,
+			Comparer: passwordV1,
+			User:     ts,
+		},
+		AlgoWProxy: &http.NoopProxyHandler{},
 		// Wrap the BucketService in a storage backed one that will ensure deleted buckets are removed from the storage engine.
 		BucketService:                   ts.BucketService,
 		SessionService:                  sessionSvc,
@@ -751,7 +723,6 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		SourceService:                   sourceSvc,
 		VariableService:                 variableSvc,
 		PasswordsService:                ts.PasswordsService,
-		InfluxQLService:                 storageQueryService,
 		InfluxqldService:                iqlquery.NewProxyExecutor(m.log, qe),
 		FluxService:                     storageQueryService,
 		FluxLanguageService:             fluxlang.DefaultService,
@@ -761,7 +732,6 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		NotificationEndpointService:     notificationEndpointSvc,
 		CheckService:                    checkSvc,
 		ScraperTargetStoreService:       scraperTargetSvc,
-		ChronografService:               chronografSvc,
 		SecretService:                   secretSvc,
 		LookupService:                   resourceResolver,
 		DocumentService:                 m.kvService,
@@ -769,7 +739,7 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		WriteEventRecorder:              infprom.NewEventRecorder("write"),
 		QueryEventRecorder:              infprom.NewEventRecorder("query"),
 		Flagger:                         m.flagger,
-		FlagsHandler:                    feature.NewFlagsHandler(kithttp.ErrorHandler(0), feature.ByKey),
+		FlagsHandler:                    feature.NewFlagsHandler(errorHandler, feature.ByKey),
 	}
 
 	m.reg.MustRegister(m.apibackend.PrometheusCollectors()...)
@@ -783,6 +753,7 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		authedUrmSVC := authorizer.NewURMService(b.OrgLookupService, b.UserResourceMappingService)
 		pkgerLogger := m.log.With(zap.String("service", "pkger"))
 		pkgSVC = pkger.NewService(
+			pkger.WithHTTPClient(pkger.NewDefaultHTTPClient(urlValidator)),
 			pkger.WithLogger(pkgerLogger),
 			pkger.WithStore(pkger.NewStoreKV(m.kvStore)),
 			pkger.WithBucketSVC(authorizer.NewBucketService(b.BucketService)),
@@ -812,7 +783,7 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 	var templatesHTTPServer *pkger.HTTPServerTemplates
 	{
 		tLogger := m.log.With(zap.String("handler", "templates"))
-		templatesHTTPServer = pkger.NewHTTPServerTemplates(tLogger, pkgSVC)
+		templatesHTTPServer = pkger.NewHTTPServerTemplates(tLogger, pkgSVC, pkger.NewDefaultHTTPClient(urlValidator))
 	}
 
 	userHTTPServer := ts.NewUserHTTPHandler(m.log)
@@ -890,124 +861,324 @@ func (m *Launcher) run(ctx context.Context, opts *InfluxdOpts) (err error) {
 		)
 	}
 
-	{
-		platformHandler := http.NewPlatformHandler(m.apibackend,
-			http.WithResourceHandler(stacksHTTPServer),
-			http.WithResourceHandler(templatesHTTPServer),
-			http.WithResourceHandler(onboardHTTPServer),
-			http.WithResourceHandler(authHTTPServer),
-			http.WithResourceHandler(labelHandler),
-			http.WithResourceHandler(sessionHTTPServer.SignInResourceHandler()),
-			http.WithResourceHandler(sessionHTTPServer.SignOutResourceHandler()),
-			http.WithResourceHandler(userHTTPServer.MeResourceHandler()),
-			http.WithResourceHandler(userHTTPServer.UserResourceHandler()),
-			http.WithResourceHandler(orgHTTPServer),
-			http.WithResourceHandler(bucketHTTPServer),
-			http.WithResourceHandler(v1AuthHTTPServer),
-			http.WithResourceHandler(dashboardServer),
-		)
+	notebookSvc := notebooks.NewService(m.sqlStore)
+	notebookServer := notebookTransport.NewNotebookHandler(
+		m.log.With(zap.String("handler", "notebooks")),
+		authorizer.NewNotebookService(
+			notebooks.NewLoggingService(
+				m.log.With(zap.String("service", "notebooks")),
+				notebooks.NewMetricCollectingService(m.reg, notebookSvc),
+			),
+		),
+	)
 
-		httpLogger := m.log.With(zap.String("service", "http"))
-		m.httpServer.Handler = http.NewHandlerFromRegistry(
-			"platform",
-			m.reg,
-			http.WithLog(httpLogger),
-			http.WithAPIHandler(platformHandler),
-		)
+	annotationSvc := annotations.NewService(m.sqlStore)
+	annotationServer := annotationTransport.NewAnnotationHandler(
+		m.log.With(zap.String("handler", "annotations")),
+		authorizer.NewAnnotationService(
+			annotations.NewLoggingService(
+				m.log.With(zap.String("service", "annotations")),
+				annotations.NewMetricCollectingService(m.reg, annotationSvc),
+			),
+		),
+	)
 
-		if opts.LogLevel == zap.DebugLevel {
-			m.httpServer.Handler = http.LoggingMW(httpLogger)(m.httpServer.Handler)
-		}
-		// If we are in testing mode we allow all data to be flushed and removed.
-		if opts.Testing {
-			m.httpServer.Handler = http.DebugFlush(ctx, m.httpServer.Handler, flushers)
-		}
-	}
-
-	ln, err := net.Listen("tcp", opts.HttpBindAddress)
+	configHandler, err := http.NewConfigHandler(m.log.With(zap.String("handler", "config")), opts.BindCliOpts())
 	if err != nil {
-		m.log.Error("failed http listener", zap.Error(err))
-		m.log.Info("Stopping")
 		return err
 	}
 
-	var cer tls.Certificate
-	transport := "http"
+	platformHandler := http.NewPlatformHandler(
+		m.apibackend,
+		http.WithResourceHandler(stacksHTTPServer),
+		http.WithResourceHandler(templatesHTTPServer),
+		http.WithResourceHandler(onboardHTTPServer),
+		http.WithResourceHandler(authHTTPServer),
+		http.WithResourceHandler(labelHandler),
+		http.WithResourceHandler(sessionHTTPServer.SignInResourceHandler()),
+		http.WithResourceHandler(sessionHTTPServer.SignOutResourceHandler()),
+		http.WithResourceHandler(userHTTPServer.MeResourceHandler()),
+		http.WithResourceHandler(userHTTPServer.UserResourceHandler()),
+		http.WithResourceHandler(orgHTTPServer),
+		http.WithResourceHandler(bucketHTTPServer),
+		http.WithResourceHandler(v1AuthHTTPServer),
+		http.WithResourceHandler(dashboardServer),
+		http.WithResourceHandler(notebookServer),
+		http.WithResourceHandler(annotationServer),
+		http.WithResourceHandler(remotesServer),
+		http.WithResourceHandler(replicationServer),
+		http.WithResourceHandler(configHandler),
+	)
 
-	if opts.HttpTLSCert != "" && opts.HttpTLSKey != "" {
-		var err error
-		cer, err = tls.LoadX509KeyPair(opts.HttpTLSCert, opts.HttpTLSKey)
+	httpLogger := m.log.With(zap.String("service", "http"))
+	var httpHandler nethttp.Handler = http.NewRootHandler(
+		"platform",
+		http.WithLog(httpLogger),
+		http.WithAPIHandler(platformHandler),
+		http.WithPprofEnabled(!opts.ProfilingDisabled),
+		http.WithMetrics(m.reg, !opts.MetricsDisabled),
+	)
 
-		if err != nil {
-			m.log.Error("failed to load x509 key pair", zap.Error(err))
-			m.log.Info("Stopping")
-			return err
-		}
-		transport = "https"
-
-		// Sensible default
-		var tlsMinVersion uint16 = tls.VersionTLS12
-
-		switch opts.HttpTLSMinVersion {
-		case "1.0":
-			m.log.Warn("Setting the minimum version of TLS to 1.0 - this is discouraged. Please use 1.2 or 1.3")
-			tlsMinVersion = tls.VersionTLS10
-		case "1.1":
-			m.log.Warn("Setting the minimum version of TLS to 1.1 - this is discouraged. Please use 1.2 or 1.3")
-			tlsMinVersion = tls.VersionTLS11
-		case "1.2":
-			tlsMinVersion = tls.VersionTLS12
-		case "1.3":
-			tlsMinVersion = tls.VersionTLS13
-		}
-
-		strictCiphers := []uint16{
-			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA,
-			tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
-			tls.TLS_RSA_WITH_AES_256_CBC_SHA,
-		}
-
-		// nil uses the default cipher suite
-		var cipherConfig []uint16 = nil
-
-		// TLS 1.3 does not support configuring the Cipher suites
-		if tlsMinVersion != tls.VersionTLS13 && opts.HttpTLSStrictCiphers {
-			cipherConfig = strictCiphers
-		}
-
-		m.httpServer.TLSConfig = &tls.Config{
-			CurvePreferences:         []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
-			PreferServerCipherSuites: true,
-			MinVersion:               tlsMinVersion,
-			CipherSuites:             cipherConfig,
-		}
+	if opts.LogLevel == zap.DebugLevel {
+		httpHandler = http.LoggingMW(httpLogger)(httpHandler)
 	}
-
-	if addr, ok := ln.Addr().(*net.TCPAddr); ok {
-		m.httpPort = addr.Port
+	// If we are in testing mode we allow all data to be flushed and removed.
+	if opts.Testing {
+		httpHandler = http.DebugFlush(ctx, httpHandler, m.flushers)
 	}
-
-	m.wg.Add(1)
-	go func(log *zap.Logger) {
-		defer m.wg.Done()
-		log.Info("Listening", zap.String("transport", transport), zap.String("addr", opts.HttpBindAddress), zap.Int("port", m.httpPort))
-
-		if cer.Certificate != nil {
-			if err := m.httpServer.ServeTLS(ln, opts.HttpTLSCert, opts.HttpTLSKey); err != nethttp.ErrServerClosed {
-				log.Error("Failed https service", zap.Error(err))
-			}
-		} else {
-			if err := m.httpServer.Serve(ln); err != nethttp.ErrServerClosed {
-				log.Error("Failed http service", zap.Error(err))
-			}
-		}
-		log.Info("Stopping")
-	}(m.log)
 
 	if !opts.ReportingDisabled {
 		m.runReporter(ctx)
 	}
+	if err := m.runHTTP(opts, httpHandler, httpLogger); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// initTracing sets up the global tracer for the influxd process.
+// Any errors encountered during setup are logged, but don't crash the process.
+func (m *Launcher) initTracing(opts *InfluxdOpts) {
+	switch opts.TracingType {
+	case LogTracing:
+		m.log.Info("Tracing via zap logging")
+		opentracing.SetGlobalTracer(pzap.NewTracer(m.log, snowflake.NewIDGenerator()))
+
+	case JaegerTracing:
+		m.log.Info("Tracing via Jaeger")
+		cfg, err := jaegerconfig.FromEnv()
+		if err != nil {
+			m.log.Error("Failed to get Jaeger client config from environment variables", zap.Error(err))
+			return
+		}
+		tracer, closer, err := cfg.NewTracer()
+		if err != nil {
+			m.log.Error("Failed to instantiate Jaeger tracer", zap.Error(err))
+			return
+		}
+		m.closers = append(m.closers, labeledCloser{
+			label: "Jaeger tracer",
+			closer: func(context.Context) error {
+				return closer.Close()
+			},
+		})
+		opentracing.SetGlobalTracer(tracer)
+	}
+}
+
+// openMetaStores opens the embedded DBs used to store metadata about influxd resources, migrating them to
+// the latest schema expected by the server.
+// On success, a unique ID is returned to be used as an identifier for the influxd instance in telemetry.
+func (m *Launcher) openMetaStores(ctx context.Context, opts *InfluxdOpts) (string, error) {
+	type flushableKVStore interface {
+		kv.SchemaStore
+		http.Flusher
+	}
+	var kvStore flushableKVStore
+	var sqlStore *sqlite.SqlStore
+
+	var procID string
+	var err error
+	switch opts.StoreType {
+	case BoltStore:
+		m.log.Warn("Using --store=bolt is deprecated. Use --store=disk instead.")
+		fallthrough
+	case DiskStore:
+		boltClient := bolt.NewClient(m.log.With(zap.String("service", "bolt")))
+		boltClient.Path = opts.BoltPath
+
+		if err := boltClient.Open(ctx); err != nil {
+			m.log.Error("Failed opening bolt", zap.Error(err))
+			return "", err
+		}
+		m.closers = append(m.closers, labeledCloser{
+			label: "bolt",
+			closer: func(context.Context) error {
+				return boltClient.Close()
+			},
+		})
+		m.reg.MustRegister(boltClient)
+		procID = boltClient.ID().String()
+
+		boltKV := bolt.NewKVStore(m.log.With(zap.String("service", "kvstore-bolt")), opts.BoltPath)
+		boltKV.WithDB(boltClient.DB())
+		kvStore = boltKV
+
+		// If a sqlite-path is not specified, store sqlite db in the same directory as bolt with the default filename.
+		if opts.SqLitePath == "" {
+			opts.SqLitePath = filepath.Join(filepath.Dir(opts.BoltPath), sqlite.DefaultFilename)
+		}
+		sqlStore, err = sqlite.NewSqlStore(opts.SqLitePath, m.log.With(zap.String("service", "sqlite")))
+		if err != nil {
+			m.log.Error("Failed opening sqlite store", zap.Error(err))
+			return "", err
+		}
+
+	case MemoryStore:
+		kvStore = inmem.NewKVStore()
+		sqlStore, err = sqlite.NewSqlStore(sqlite.InmemPath, m.log.With(zap.String("service", "sqlite")))
+		if err != nil {
+			m.log.Error("Failed opening sqlite store", zap.Error(err))
+			return "", err
+		}
+
+	default:
+		err := fmt.Errorf("unknown store type %s; expected disk or memory", opts.StoreType)
+		m.log.Error("Failed opening metadata store", zap.Error(err))
+		return "", err
+	}
+
+	m.closers = append(m.closers, labeledCloser{
+		label: "sqlite",
+		closer: func(context.Context) error {
+			return sqlStore.Close()
+		},
+	})
+	if opts.Testing {
+		m.flushers = append(m.flushers, kvStore, sqlStore)
+	}
+
+	// Apply migrations to the KV and SQL metadata stores.
+	kvMigrator, err := migration.NewMigrator(
+		m.log.With(zap.String("service", "KV migrations")),
+		kvStore,
+		all.Migrations[:]...,
+	)
+	if err != nil {
+		m.log.Error("Failed to initialize kv migrator", zap.Error(err))
+		return "", err
+	}
+	sqlMigrator := sqlite.NewMigrator(sqlStore, m.log.With(zap.String("service", "SQL migrations")))
+
+	// If we're migrating a persistent data store, take a backup of the pre-migration state for rollback.
+	if opts.StoreType == DiskStore || opts.StoreType == BoltStore {
+		backupPattern := "%s.pre-%s-upgrade.backup"
+		info := platform.GetBuildInfo()
+		kvMigrator.SetBackupPath(fmt.Sprintf(backupPattern, opts.BoltPath, info.Version))
+		sqlMigrator.SetBackupPath(fmt.Sprintf(backupPattern, opts.SqLitePath, info.Version))
+	}
+	if err := kvMigrator.Up(ctx); err != nil {
+		m.log.Error("Failed to apply KV migrations", zap.Error(err))
+		return "", err
+	}
+	if err := sqlMigrator.Up(ctx, sqliteMigrations.AllUp); err != nil {
+		m.log.Error("Failed to apply SQL migrations", zap.Error(err))
+		return "", err
+	}
+
+	m.kvStore = kvStore
+	m.sqlStore = sqlStore
+	return procID, nil
+}
+
+// runHTTP configures and launches a listener for incoming HTTP(S) requests.
+// The listener is run in a separate goroutine. If it fails to start up, it
+// will cancel the launcher.
+func (m *Launcher) runHTTP(opts *InfluxdOpts, handler nethttp.Handler, httpLogger *zap.Logger) error {
+	log := m.log.With(zap.String("service", "tcp-listener"))
+
+	httpServer := &nethttp.Server{
+		Addr:              opts.HttpBindAddress,
+		Handler:           handler,
+		ReadHeaderTimeout: opts.HttpReadHeaderTimeout,
+		ReadTimeout:       opts.HttpReadTimeout,
+		WriteTimeout:      opts.HttpWriteTimeout,
+		IdleTimeout:       opts.HttpIdleTimeout,
+		ErrorLog:          zap.NewStdLog(httpLogger),
+	}
+	m.closers = append(m.closers, labeledCloser{
+		label:  "HTTP server",
+		closer: httpServer.Shutdown,
+	})
+
+	ln, err := net.Listen("tcp", opts.HttpBindAddress)
+	if err != nil {
+		log.Error("Failed to set up TCP listener", zap.String("addr", opts.HttpBindAddress), zap.Error(err))
+		return err
+	}
+	if addr, ok := ln.Addr().(*net.TCPAddr); ok {
+		m.httpPort = addr.Port
+	}
+	m.wg.Add(1)
+
+	m.tlsEnabled = opts.HttpTLSCert != "" && opts.HttpTLSKey != ""
+	if !m.tlsEnabled {
+		if opts.HttpTLSCert != "" || opts.HttpTLSKey != "" {
+			log.Warn("TLS requires specifying both cert and key, falling back to HTTP")
+		}
+
+		go func(log *zap.Logger) {
+			defer m.wg.Done()
+			log.Info("Listening", zap.String("transport", "http"), zap.String("addr", opts.HttpBindAddress), zap.Int("port", m.httpPort))
+
+			if err := httpServer.Serve(ln); err != nethttp.ErrServerClosed {
+				log.Error("Failed to serve HTTP", zap.Error(err))
+				m.cancel()
+			}
+			log.Info("Stopping")
+		}(log)
+
+		return nil
+	}
+
+	if _, err = tls.LoadX509KeyPair(opts.HttpTLSCert, opts.HttpTLSKey); err != nil {
+		log.Error("Failed to load x509 key pair", zap.String("cert-path", opts.HttpTLSCert), zap.String("key-path", opts.HttpTLSKey))
+		return err
+	}
+
+	var tlsMinVersion uint16
+	var useStrictCiphers = opts.HttpTLSStrictCiphers
+	switch opts.HttpTLSMinVersion {
+	case "1.0":
+		log.Warn("Setting the minimum version of TLS to 1.0 - this is discouraged. Please use 1.2 or 1.3")
+		tlsMinVersion = tls.VersionTLS10
+	case "1.1":
+		log.Warn("Setting the minimum version of TLS to 1.1 - this is discouraged. Please use 1.2 or 1.3")
+		tlsMinVersion = tls.VersionTLS11
+	case "1.2":
+		tlsMinVersion = tls.VersionTLS12
+	case "1.3":
+		if useStrictCiphers {
+			log.Warn("TLS version 1.3 does not support configuring strict ciphers")
+			useStrictCiphers = false
+		}
+		tlsMinVersion = tls.VersionTLS13
+	default:
+		return fmt.Errorf("unsupported TLS version: %s", opts.HttpTLSMinVersion)
+	}
+
+	// nil uses the default cipher suite
+	var cipherConfig []uint16 = nil
+	if useStrictCiphers {
+		// See https://ssl-config.mozilla.org/#server=go&version=1.14.4&config=intermediate&guideline=5.6
+		cipherConfig = []uint16{
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+		}
+	}
+
+	httpServer.TLSConfig = &tls.Config{
+		CurvePreferences:         []tls.CurveID{tls.CurveP521, tls.CurveP384, tls.CurveP256},
+		PreferServerCipherSuites: !useStrictCiphers,
+		MinVersion:               tlsMinVersion,
+		CipherSuites:             cipherConfig,
+	}
+
+	go func(log *zap.Logger) {
+		defer m.wg.Done()
+		log.Info("Listening", zap.String("transport", "https"), zap.String("addr", opts.HttpBindAddress), zap.Int("port", m.httpPort))
+
+		if err := httpServer.ServeTLS(ln, opts.HttpTLSCert, opts.HttpTLSKey); err != nethttp.ErrServerClosed {
+			log.Error("Failed to serve HTTPS", zap.Error(err))
+			m.cancel()
+		}
+		log.Info("Stopping")
+	}(log)
 
 	return nil
 }
@@ -1090,14 +1261,13 @@ func (m *Launcher) UserService() platform.UserService {
 	return m.apibackend.UserService
 }
 
-// UserResourceMappingService returns the internal user resource mapping service.
-func (m *Launcher) UserResourceMappingService() platform.UserResourceMappingService {
-	return m.apibackend.UserResourceMappingService
-}
-
 // AuthorizationService returns the internal authorization service.
 func (m *Launcher) AuthorizationService() platform.AuthorizationService {
 	return m.apibackend.AuthorizationService
+}
+
+func (m *Launcher) AuthorizationV1Service() platform.AuthorizationService {
+	return m.apibackend.AuthorizationV1Service
 }
 
 // SecretService returns the internal secret service.
@@ -1105,27 +1275,12 @@ func (m *Launcher) SecretService() platform.SecretService {
 	return m.apibackend.SecretService
 }
 
-// TaskService returns the internal task service.
-func (m *Launcher) TaskService() platform.TaskService {
-	return m.apibackend.TaskService
-}
-
-// TaskControlService returns the internal store service.
-func (m *Launcher) TaskControlService() taskbackend.TaskControlService {
-	return m.taskControlService
-}
-
 // CheckService returns the internal check service.
 func (m *Launcher) CheckService() platform.CheckService {
 	return m.apibackend.CheckService
 }
 
-// KeyValueService returns the internal key-value service.
-func (m *Launcher) KeyValueService() *kv.Service {
-	return m.kvService
-}
-
-func (m *Launcher) DBRPMappingServiceV2() platform.DBRPMappingServiceV2 {
+func (m *Launcher) DBRPMappingService() platform.DBRPMappingService {
 	return m.apibackend.DBRPService
 }
 

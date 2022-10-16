@@ -9,6 +9,7 @@ import (
 	"github.com/influxdata/flux/csv"
 	platform "github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/kit/check"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kit/tracing"
 )
 
@@ -172,7 +173,7 @@ type REPLQuerier struct {
 	// Authorization is the authorization to provide for all requests
 	Authorization *platform.Authorization
 	// OrganizationID is the ID to provide for all requests
-	OrganizationID platform.ID
+	OrganizationID platform2.ID
 	QueryService   QueryService
 }
 

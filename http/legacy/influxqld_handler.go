@@ -2,15 +2,17 @@ package legacy
 
 import (
 	"encoding/json"
-	"io/ioutil"
+	"io"
 	"mime"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 
 	"github.com/influxdata/flux/iocounter"
 	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/influxql"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/kit/tracing"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
@@ -46,8 +48,8 @@ func (h *InfluxqlHandler) handleInfluxqldQuery(w http.ResponseWriter, r *http.Re
 	}
 
 	if !auth.IsActive() {
-		h.HandleHTTPError(ctx, &influxdb.Error{
-			Code: influxdb.EForbidden,
+		h.HandleHTTPError(ctx, &errors.Error{
+			Code: errors.EForbidden,
 			Msg:  "insufficient permissions",
 		}, w)
 		return
@@ -68,7 +70,7 @@ func (h *InfluxqlHandler) handleInfluxqldQuery(w http.ResponseWriter, r *http.Re
 	} else if r.MultipartForm != nil && r.MultipartForm.File != nil {
 		// If we have a multipart/form-data, try to retrieve a file from 'q'.
 		if fhs := r.MultipartForm.File["q"]; len(fhs) > 0 {
-			d, err := ioutil.ReadFile(fhs[0].Filename)
+			d, err := os.ReadFile(fhs[0].Filename)
 			if err != nil {
 				h.HandleHTTPError(ctx, err, w)
 				return
@@ -79,15 +81,15 @@ func (h *InfluxqlHandler) handleInfluxqldQuery(w http.ResponseWriter, r *http.Re
 		ct := r.Header.Get("Content-Type")
 		mt, _, err := mime.ParseMediaType(ct)
 		if err != nil {
-			h.HandleHTTPError(ctx, &influxdb.Error{
-				Code: influxdb.EInvalid,
+			h.HandleHTTPError(ctx, &errors.Error{
+				Code: errors.EInvalid,
 				Err:  err,
 			}, w)
 			return
 		}
 
 		if mt == "application/vnd.influxql" {
-			if d, err := ioutil.ReadAll(r.Body); err != nil {
+			if d, err := io.ReadAll(r.Body); err != nil {
 				h.HandleHTTPError(ctx, err, w)
 				return
 			} else {
@@ -103,8 +105,8 @@ func (h *InfluxqlHandler) handleInfluxqldQuery(w http.ResponseWriter, r *http.Re
 		decoder := json.NewDecoder(strings.NewReader(rawParams))
 		decoder.UseNumber()
 		if err := decoder.Decode(&params); err != nil {
-			h.HandleHTTPError(ctx, &influxdb.Error{
-				Code: influxdb.EInvalid,
+			h.HandleHTTPError(ctx, &errors.Error{
+				Code: errors.EInvalid,
 				Msg:  "error parsing query parameters",
 				Err:  err,
 			}, w)
@@ -122,8 +124,8 @@ func (h *InfluxqlHandler) handleInfluxqldQuery(w http.ResponseWriter, r *http.Re
 				}
 
 				if err != nil {
-					h.HandleHTTPError(ctx, &influxdb.Error{
-						Code: influxdb.EInvalid,
+					h.HandleHTTPError(ctx, &errors.Error{
+						Code: errors.EInvalid,
 						Msg:  "error parsing json value",
 						Err:  err,
 					}, w)
@@ -142,11 +144,15 @@ func (h *InfluxqlHandler) handleInfluxqldQuery(w http.ResponseWriter, r *http.Re
 		}
 	}
 
+	formatString := r.Header.Get("Accept")
+	encodingFormat := influxql.EncodingFormatFromMimeType(formatString)
+	w.Header().Set("Content-Type", encodingFormat.ContentType())
+
 	req := &influxql.QueryRequest{
 		DB:             r.FormValue("db"),
 		RP:             r.FormValue("rp"),
 		Epoch:          r.FormValue("epoch"),
-		EncodingFormat: influxql.EncodingFormatFromMimeType(r.Header.Get("Accept")),
+		EncodingFormat: encodingFormat,
 		OrganizationID: o.ID,
 		Query:          query,
 		Params:         params,

@@ -5,13 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/influxdata/httprouter"
 	platform "github.com/influxdata/influxdb/v2"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"github.com/influxdata/influxdb/v2/label"
 	"github.com/influxdata/influxdb/v2/mock"
@@ -111,7 +113,7 @@ func TestService_handleGetLabels(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewLabelHandler(zaptest.NewLogger(t), tt.fields.LabelService, kithttp.ErrorHandler(0))
+			h := NewLabelHandler(zaptest.NewLogger(t), tt.fields.LabelService, kithttp.NewErrorHandler(zaptest.NewLogger(t)))
 
 			r := httptest.NewRequest("GET", "http://any.url", nil)
 
@@ -121,7 +123,7 @@ func TestService_handleGetLabels(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleGetLabels() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -159,7 +161,7 @@ func TestService_handleGetLabel(t *testing.T) {
 			name: "get a label by id",
 			fields: fields{
 				&mock.LabelService{
-					FindLabelByIDFn: func(ctx context.Context, id platform.ID) (*platform.Label, error) {
+					FindLabelByIDFn: func(ctx context.Context, id platform2.ID) (*platform.Label, error) {
 						if id == platformtesting.MustIDBase16("020f755c3c082000") {
 							return &platform.Label{
 								ID:   platformtesting.MustIDBase16("020f755c3c082000"),
@@ -200,9 +202,9 @@ func TestService_handleGetLabel(t *testing.T) {
 			name: "not found",
 			fields: fields{
 				&mock.LabelService{
-					FindLabelByIDFn: func(ctx context.Context, id platform.ID) (*platform.Label, error) {
-						return nil, &platform.Error{
-							Code: platform.ENotFound,
+					FindLabelByIDFn: func(ctx context.Context, id platform2.ID) (*platform.Label, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  platform.ErrLabelNotFound,
 						}
 					},
@@ -219,7 +221,7 @@ func TestService_handleGetLabel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewLabelHandler(zaptest.NewLogger(t), tt.fields.LabelService, kithttp.ErrorHandler(0))
+			h := NewLabelHandler(zaptest.NewLogger(t), tt.fields.LabelService, kithttp.NewErrorHandler(zaptest.NewLogger(t)))
 
 			r := httptest.NewRequest("GET", "http://any.url", nil)
 
@@ -239,7 +241,7 @@ func TestService_handleGetLabel(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleGetLabel() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -314,7 +316,7 @@ func TestService_handlePostLabel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewLabelHandler(zaptest.NewLogger(t), tt.fields.LabelService, kithttp.ErrorHandler(0))
+			h := NewLabelHandler(zaptest.NewLogger(t), tt.fields.LabelService, kithttp.NewErrorHandler(zaptest.NewLogger(t)))
 
 			l, err := json.Marshal(tt.args.label)
 			if err != nil {
@@ -328,7 +330,7 @@ func TestService_handlePostLabel(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePostLabel() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -366,7 +368,7 @@ func TestService_handleDeleteLabel(t *testing.T) {
 			name: "remove a label by id",
 			fields: fields{
 				&mock.LabelService{
-					DeleteLabelFn: func(ctx context.Context, id platform.ID) error {
+					DeleteLabelFn: func(ctx context.Context, id platform2.ID) error {
 						if id == platformtesting.MustIDBase16("020f755c3c082000") {
 							return nil
 						}
@@ -386,9 +388,9 @@ func TestService_handleDeleteLabel(t *testing.T) {
 			name: "label not found",
 			fields: fields{
 				&mock.LabelService{
-					DeleteLabelFn: func(ctx context.Context, id platform.ID) error {
-						return &platform.Error{
-							Code: platform.ENotFound,
+					DeleteLabelFn: func(ctx context.Context, id platform2.ID) error {
+						return &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  platform.ErrLabelNotFound,
 						}
 					},
@@ -405,7 +407,7 @@ func TestService_handleDeleteLabel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewLabelHandler(zaptest.NewLogger(t), tt.fields.LabelService, kithttp.ErrorHandler(0))
+			h := NewLabelHandler(zaptest.NewLogger(t), tt.fields.LabelService, kithttp.NewErrorHandler(zaptest.NewLogger(t)))
 
 			r := httptest.NewRequest("GET", "http://any.url", nil)
 
@@ -425,7 +427,7 @@ func TestService_handleDeleteLabel(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePostLabel() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -468,7 +470,7 @@ func TestService_handlePatchLabel(t *testing.T) {
 			name: "update label properties",
 			fields: fields{
 				&mock.LabelService{
-					UpdateLabelFn: func(ctx context.Context, id platform.ID, upd platform.LabelUpdate) (*platform.Label, error) {
+					UpdateLabelFn: func(ctx context.Context, id platform2.ID, upd platform.LabelUpdate) (*platform.Label, error) {
 						if id == platformtesting.MustIDBase16("020f755c3c082000") {
 							l := &platform.Label{
 								ID:   platformtesting.MustIDBase16("020f755c3c082000"),
@@ -522,9 +524,9 @@ func TestService_handlePatchLabel(t *testing.T) {
 			name: "label not found",
 			fields: fields{
 				&mock.LabelService{
-					UpdateLabelFn: func(ctx context.Context, id platform.ID, upd platform.LabelUpdate) (*platform.Label, error) {
-						return nil, &platform.Error{
-							Code: platform.ENotFound,
+					UpdateLabelFn: func(ctx context.Context, id platform2.ID, upd platform.LabelUpdate) (*platform.Label, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  platform.ErrLabelNotFound,
 						}
 					},
@@ -544,7 +546,7 @@ func TestService_handlePatchLabel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := NewLabelHandler(zaptest.NewLogger(t), tt.fields.LabelService, kithttp.ErrorHandler(0))
+			h := NewLabelHandler(zaptest.NewLogger(t), tt.fields.LabelService, kithttp.NewErrorHandler(zaptest.NewLogger(t)))
 
 			upd := platform.LabelUpdate{}
 			if len(tt.args.properties) > 0 {
@@ -574,7 +576,7 @@ func TestService_handlePatchLabel(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePatchLabel() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -594,8 +596,7 @@ func TestService_handlePatchLabel(t *testing.T) {
 }
 
 func initLabelService(f platformtesting.LabelFields, t *testing.T) (platform.LabelService, string, func()) {
-	store := NewTestInmemStore(t)
-
+	store := platformtesting.NewTestInmemStore(t)
 	labelStore, err := label.NewStore(store)
 	if err != nil {
 		t.Fatal(err)
@@ -622,7 +623,7 @@ func initLabelService(f platformtesting.LabelFields, t *testing.T) (platform.Lab
 		}
 	}
 
-	handler := NewLabelHandler(zaptest.NewLogger(t), labelService, kithttp.ErrorHandler(0))
+	handler := NewLabelHandler(zaptest.NewLogger(t), labelService, kithttp.NewErrorHandler(zaptest.NewLogger(t)))
 	server := httptest.NewServer(handler)
 	client := LabelService{
 		Client: mustNewHTTPClient(t, server.URL, ""),

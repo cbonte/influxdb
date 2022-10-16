@@ -2,13 +2,49 @@ package testing
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/bolt"
+	"github.com/influxdata/influxdb/v2/inmem"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
+	"github.com/influxdata/influxdb/v2/kv"
+	"github.com/influxdata/influxdb/v2/kv/migration/all"
+	"github.com/influxdata/influxdb/v2/query/fluxlang"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
 )
+
+func NewTestBoltStore(t *testing.T) (kv.SchemaStore, func()) {
+	f, err := os.CreateTemp("", "influxdata-bolt-")
+	require.NoError(t, err, "unable to create temporary boltdb file")
+	require.NoError(t, f.Close())
+
+	path := f.Name()
+	s := bolt.NewKVStore(zaptest.NewLogger(t), path, bolt.WithNoSync)
+	require.NoError(t, s.Open(context.Background()))
+
+	// apply all kv migrations
+	require.NoError(t, all.Up(context.Background(), zaptest.NewLogger(t), s))
+
+	close := func() {
+		s.Close()
+		os.Remove(path)
+	}
+
+	return s, close
+}
+
+func NewTestInmemStore(t *testing.T) kv.SchemaStore {
+	s := inmem.NewKVStore()
+	// apply all kv migrations
+	require.NoError(t, all.Up(context.Background(), zaptest.NewLogger(t), s))
+	return s
+}
 
 // TODO(goller): remove opPrefix argument
 func diffPlatformErrors(name string, actual, expected error, opPrefix string, t *testing.T) {
@@ -31,31 +67,31 @@ func ErrorsEqual(t *testing.T, actual, expected error) {
 		t.Errorf("expected error %s but received nil", expected.Error())
 	}
 
-	if influxdb.ErrorCode(expected) != influxdb.ErrorCode(actual) {
+	if errors.ErrorCode(expected) != errors.ErrorCode(actual) {
 		t.Logf("\nexpected: %v\nactual: %v\n\n", expected, actual)
-		t.Errorf("expected error code %q but received %q", influxdb.ErrorCode(expected), influxdb.ErrorCode(actual))
+		t.Errorf("expected error code %q but received %q", errors.ErrorCode(expected), errors.ErrorCode(actual))
 	}
 
-	if influxdb.ErrorMessage(expected) != influxdb.ErrorMessage(actual) {
+	if errors.ErrorMessage(expected) != errors.ErrorMessage(actual) {
 		t.Logf("\nexpected: %v\nactual: %v\n\n", expected, actual)
-		t.Errorf("expected error message %q but received %q", influxdb.ErrorMessage(expected), influxdb.ErrorMessage(actual))
+		t.Errorf("expected error message %q but received %q", errors.ErrorMessage(expected), errors.ErrorMessage(actual))
 	}
 }
 
-// FloatPtr takes the ref of a float number.
-func FloatPtr(f float64) *float64 {
-	p := new(float64)
-	*p = f
-	return p
-}
-
-func idPtr(id influxdb.ID) *influxdb.ID {
+func idPtr(id platform.ID) *platform.ID {
 	return &id
 }
 
+func strPtr(s string) *string {
+	return &s
+}
+func boolPtr(b bool) *bool {
+	return &b
+}
+
 // MustIDBase16 is an helper to ensure a correct ID is built during testing.
-func MustIDBase16(s string) influxdb.ID {
-	id, err := influxdb.IDFromString(s)
+func MustIDBase16(s string) platform.ID {
+	id, err := platform.IDFromString(s)
 	if err != nil {
 		panic(err)
 	}
@@ -63,7 +99,7 @@ func MustIDBase16(s string) influxdb.ID {
 }
 
 // MustIDBase16Ptr is an helper to ensure a correct ID ptr ref is built during testing.
-func MustIDBase16Ptr(s string) *influxdb.ID {
+func MustIDBase16Ptr(s string) *platform.ID {
 	id := MustIDBase16(s)
 	return &id
 }
@@ -71,14 +107,6 @@ func MustIDBase16Ptr(s string) *influxdb.ID {
 func MustCreateOrgs(ctx context.Context, svc influxdb.OrganizationService, os ...*influxdb.Organization) {
 	for _, o := range os {
 		if err := svc.CreateOrganization(ctx, o); err != nil {
-			panic(err)
-		}
-	}
-}
-
-func MustCreateLabels(ctx context.Context, svc influxdb.LabelService, labels ...*influxdb.Label) {
-	for _, l := range labels {
-		if err := svc.CreateLabel(ctx, l); err != nil {
 			panic(err)
 		}
 	}
@@ -92,41 +120,15 @@ func MustCreateUsers(ctx context.Context, svc influxdb.UserService, us ...*influ
 	}
 }
 
-func MustCreateMappings(ctx context.Context, svc influxdb.UserResourceMappingService, ms ...*influxdb.UserResourceMapping) {
-	for _, m := range ms {
-		if err := svc.CreateUserResourceMapping(ctx, m); err != nil {
-			panic(err)
-		}
+func MustNewPermission(a influxdb.Action, rt influxdb.ResourceType, orgID platform.ID) *influxdb.Permission {
+	perm, err := influxdb.NewPermission(a, rt, orgID)
+	if err != nil {
+		panic(err)
 	}
+	return perm
 }
 
-func MustMakeUsersOrgOwner(ctx context.Context, svc influxdb.UserResourceMappingService, oid influxdb.ID, uids ...influxdb.ID) {
-	ms := make([]*influxdb.UserResourceMapping, len(uids))
-	for i, uid := range uids {
-		ms[i] = &influxdb.UserResourceMapping{
-			UserID:       uid,
-			UserType:     influxdb.Owner,
-			ResourceType: influxdb.OrgsResourceType,
-			ResourceID:   oid,
-		}
-	}
-	MustCreateMappings(ctx, svc, ms...)
-}
-
-func MustMakeUsersOrgMember(ctx context.Context, svc influxdb.UserResourceMappingService, oid influxdb.ID, uids ...influxdb.ID) {
-	ms := make([]*influxdb.UserResourceMapping, len(uids))
-	for i, uid := range uids {
-		ms[i] = &influxdb.UserResourceMapping{
-			UserID:       uid,
-			UserType:     influxdb.Member,
-			ResourceType: influxdb.OrgsResourceType,
-			ResourceID:   oid,
-		}
-	}
-	MustCreateMappings(ctx, svc, ms...)
-}
-
-func MustNewPermissionAtID(id influxdb.ID, a influxdb.Action, rt influxdb.ResourceType, orgID influxdb.ID) *influxdb.Permission {
+func MustNewPermissionAtID(id platform.ID, a influxdb.Action, rt influxdb.ResourceType, orgID platform.ID) *influxdb.Permission {
 	perm, err := influxdb.NewPermissionAtID(id, a, rt, orgID)
 	if err != nil {
 		panic(err)
@@ -134,7 +136,7 @@ func MustNewPermissionAtID(id influxdb.ID, a influxdb.Action, rt influxdb.Resour
 	return perm
 }
 
-func influxErrsEqual(t *testing.T, expected *influxdb.Error, actual error) {
+func influxErrsEqual(t *testing.T, expected *errors.Error, actual error) {
 	t.Helper()
 
 	if expected != nil {
@@ -149,8 +151,18 @@ func influxErrsEqual(t *testing.T, expected *influxdb.Error, actual error) {
 		require.NoError(t, actual)
 		return
 	}
-	iErr, ok := actual.(*influxdb.Error)
+	iErr, ok := actual.(*errors.Error)
 	require.True(t, ok)
 	assert.Equal(t, expected.Code, iErr.Code)
 	assert.Truef(t, strings.HasPrefix(iErr.Error(), expected.Error()), "expected: %s got err: %s", expected.Error(), actual.Error())
+}
+
+func FormatFluxString(t *testing.T, script string) string {
+	svc := fluxlang.DefaultService
+
+	astPkg, err := svc.Parse(script)
+	require.NoError(t, err)
+	formatted, err := svc.Format(astPkg.Files[0])
+	require.NoError(t, err)
+	return formatted
 }

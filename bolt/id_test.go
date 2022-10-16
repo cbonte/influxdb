@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	platform "github.com/influxdata/influxdb/v2"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/mock"
 )
 
@@ -15,7 +15,7 @@ func TestID(t *testing.T) {
 	}
 	defer closeFn()
 
-	testID := platform.ID(70000)
+	testID := platform2.ID(70000)
 	c.IDGenerator = mock.NewIDGenerator(testID.String(), t)
 
 	if err := c.Open(context.Background()); err != nil {

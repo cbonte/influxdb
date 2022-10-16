@@ -10,6 +10,8 @@ import (
 	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/authorizer"
 	influxdbcontext "github.com/influxdata/influxdb/v2/context"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/mock"
 	influxdbtesting "github.com/influxdata/influxdb/v2/testing"
 )
@@ -33,7 +35,7 @@ func TestOrgService_FindOrganizationByID(t *testing.T) {
 	}
 	type args struct {
 		permission influxdb.Permission
-		id         influxdb.ID
+		id         platform.ID
 	}
 	type wants struct {
 		err error
@@ -49,7 +51,7 @@ func TestOrgService_FindOrganizationByID(t *testing.T) {
 			name: "authorized to access id",
 			fields: fields{
 				OrgService: &mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID: id,
 						}, nil
@@ -74,7 +76,7 @@ func TestOrgService_FindOrganizationByID(t *testing.T) {
 			name: "unauthorized to access id",
 			fields: fields{
 				OrgService: &mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id influxdb.ID) (*influxdb.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID: id,
 						}, nil
@@ -92,9 +94,9 @@ func TestOrgService_FindOrganizationByID(t *testing.T) {
 				id: 1,
 			},
 			wants: wants{
-				err: &influxdb.Error{
+				err: &errors.Error{
 					Msg:  "read:orgs/0000000000000001 is unauthorized",
-					Code: influxdb.EUnauthorized,
+					Code: errors.EUnauthorized,
 				},
 			},
 		},
@@ -174,9 +176,9 @@ func TestOrgService_FindOrganization(t *testing.T) {
 				},
 			},
 			wants: wants{
-				err: &influxdb.Error{
+				err: &errors.Error{
 					Msg:  "read:orgs/0000000000000001 is unauthorized",
-					Code: influxdb.EUnauthorized,
+					Code: errors.EUnauthorized,
 				},
 			},
 		},
@@ -314,7 +316,7 @@ func TestOrgService_UpdateOrganization(t *testing.T) {
 		OrgService influxdb.OrganizationService
 	}
 	type args struct {
-		id         influxdb.ID
+		id         platform.ID
 		permission influxdb.Permission
 	}
 	type wants struct {
@@ -331,7 +333,7 @@ func TestOrgService_UpdateOrganization(t *testing.T) {
 			name: "authorized to update org",
 			fields: fields{
 				OrgService: &mock.OrganizationService{
-					UpdateOrganizationF: func(ctx context.Context, id influxdb.ID, upd influxdb.OrganizationUpdate) (*influxdb.Organization, error) {
+					UpdateOrganizationF: func(ctx context.Context, id platform.ID, upd influxdb.OrganizationUpdate) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID: 1,
 						}, nil
@@ -356,7 +358,7 @@ func TestOrgService_UpdateOrganization(t *testing.T) {
 			name: "unauthorized to update org",
 			fields: fields{
 				OrgService: &mock.OrganizationService{
-					UpdateOrganizationF: func(ctx context.Context, id influxdb.ID, upd influxdb.OrganizationUpdate) (*influxdb.Organization, error) {
+					UpdateOrganizationF: func(ctx context.Context, id platform.ID, upd influxdb.OrganizationUpdate) (*influxdb.Organization, error) {
 						return &influxdb.Organization{
 							ID: 1,
 						}, nil
@@ -374,9 +376,9 @@ func TestOrgService_UpdateOrganization(t *testing.T) {
 				},
 			},
 			wants: wants{
-				err: &influxdb.Error{
+				err: &errors.Error{
 					Msg:  "write:orgs/0000000000000001 is unauthorized",
-					Code: influxdb.EUnauthorized,
+					Code: errors.EUnauthorized,
 				},
 			},
 		},
@@ -400,7 +402,7 @@ func TestOrgService_DeleteOrganization(t *testing.T) {
 		OrgService influxdb.OrganizationService
 	}
 	type args struct {
-		id         influxdb.ID
+		id         platform.ID
 		permission influxdb.Permission
 	}
 	type wants struct {
@@ -417,7 +419,7 @@ func TestOrgService_DeleteOrganization(t *testing.T) {
 			name: "authorized to delete org",
 			fields: fields{
 				OrgService: &mock.OrganizationService{
-					DeleteOrganizationF: func(ctx context.Context, id influxdb.ID) error {
+					DeleteOrganizationF: func(ctx context.Context, id platform.ID) error {
 						return nil
 					},
 				},
@@ -440,7 +442,7 @@ func TestOrgService_DeleteOrganization(t *testing.T) {
 			name: "unauthorized to delete org",
 			fields: fields{
 				OrgService: &mock.OrganizationService{
-					DeleteOrganizationF: func(ctx context.Context, id influxdb.ID) error {
+					DeleteOrganizationF: func(ctx context.Context, id platform.ID) error {
 						return nil
 					},
 				},
@@ -456,9 +458,9 @@ func TestOrgService_DeleteOrganization(t *testing.T) {
 				},
 			},
 			wants: wants{
-				err: &influxdb.Error{
+				err: &errors.Error{
 					Msg:  "write:orgs/0000000000000001 is unauthorized",
-					Code: influxdb.EUnauthorized,
+					Code: errors.EUnauthorized,
 				},
 			},
 		},
@@ -534,9 +536,9 @@ func TestOrgService_CreateOrganization(t *testing.T) {
 				},
 			},
 			wants: wants{
-				err: &influxdb.Error{
+				err: &errors.Error{
 					Msg:  "write:orgs is unauthorized",
-					Code: influxdb.EUnauthorized,
+					Code: errors.EUnauthorized,
 				},
 			},
 		},

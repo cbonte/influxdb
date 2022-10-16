@@ -9,10 +9,10 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/gogo/protobuf/proto"
-	"github.com/influxdata/influxdb/v2"
 	internal "github.com/influxdata/influxdb/v2/influxql/query/internal"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxql"
+	"google.golang.org/protobuf/proto"
 )
 
 // ErrUnknownCall is returned when operating on an unknown function call.
@@ -43,11 +43,22 @@ func (a Iterators) Stats() IteratorStats {
 }
 
 // Close closes all iterators.
-func (a Iterators) Close() error {
+// We are seeing an occasional panic in this function
+// which looks like a nil reference from one
+// itr.Close() call, thus we check for nil elements
+// in the slice a.  This is often called as error
+// clean-up, so the state of the iterators may be
+// unhappy.
+func (a Iterators) Close() (err error) {
+	err = nil
 	for _, itr := range a {
-		itr.Close()
+		if itr != nil {
+			if e := itr.Close(); e != nil && err == nil {
+				err = e
+			}
+		}
 	}
-	return nil
+	return err
 }
 
 // filterNonNil returns a slice of iterators that removes all nil iterators.
@@ -140,6 +151,13 @@ func (a Iterators) Merge(opt IteratorOptions) (Iterator, error) {
 	if call.Name == "count" {
 		opt.Expr = &influxql.Call{
 			Name: "sum",
+			Args: call.Args,
+		}
+	}
+	// When merging the sum_hll() function, use merge_hll() to sum the counted points.
+	if call.Name == "sum_hll" {
+		opt.Expr = &influxql.Call{
+			Name: "merge_hll",
 			Args: call.Args,
 		}
 	}
@@ -541,7 +559,7 @@ type IteratorCreator interface {
 // IteratorOptions is an object passed to CreateIterator to specify creation options.
 type IteratorOptions struct {
 	// OrgID is the organization for which this query is being executed.
-	OrgID influxdb.ID
+	OrgID platform.ID
 
 	// Expression to iterate for.
 	// This can be VarRef or a Call.
@@ -799,6 +817,8 @@ func (opt IteratorOptions) Window(t int64) (start, end int64) {
 		start = t - dt
 	}
 
+	start += int64(opt.Interval.Offset)
+
 	// Look for the start offset again because the first time may have been
 	// after the offset switch. Now that we are at midnight in UTC, we can
 	// lookup the zone offset again to get the real starting offset.
@@ -810,7 +830,6 @@ func (opt IteratorOptions) Window(t int64) (start, end int64) {
 			start += o
 		}
 	}
-	start += int64(opt.Interval.Offset)
 
 	// Find the end time.
 	if dt := int64(opt.Interval.Duration) - dt; influxql.MaxTime-dt <= t {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/influxdata/flux/execute"
+	"github.com/influxdata/flux/interval"
 	"github.com/influxdata/influxdb/v2/storage/reads/datatypes"
 	"github.com/influxdata/influxdb/v2/tsdb/cursors"
 )
@@ -19,31 +19,31 @@ func (v *singleValue) Value(key string) (interface{}, bool) {
 
 func newAggregateArrayCursor(ctx context.Context, agg *datatypes.Aggregate, cursor cursors.Cursor) (cursors.Cursor, error) {
 	switch agg.Type {
-	case datatypes.AggregateTypeFirst, datatypes.AggregateTypeLast:
+	case datatypes.Aggregate_AggregateTypeFirst, datatypes.Aggregate_AggregateTypeLast:
 		return newLimitArrayCursor(cursor), nil
 	}
-	return newWindowAggregateArrayCursor(ctx, agg, execute.Window{}, cursor)
+	return newWindowAggregateArrayCursor(ctx, agg, interval.Window{}, cursor)
 }
 
-func newWindowAggregateArrayCursor(ctx context.Context, agg *datatypes.Aggregate, window execute.Window, cursor cursors.Cursor) (cursors.Cursor, error) {
+func newWindowAggregateArrayCursor(ctx context.Context, agg *datatypes.Aggregate, window interval.Window, cursor cursors.Cursor) (cursors.Cursor, error) {
 	if cursor == nil {
 		return nil, nil
 	}
 
 	switch agg.Type {
-	case datatypes.AggregateTypeCount:
+	case datatypes.Aggregate_AggregateTypeCount:
 		return newWindowCountArrayCursor(cursor, window), nil
-	case datatypes.AggregateTypeSum:
+	case datatypes.Aggregate_AggregateTypeSum:
 		return newWindowSumArrayCursor(cursor, window)
-	case datatypes.AggregateTypeFirst:
+	case datatypes.Aggregate_AggregateTypeFirst:
 		return newWindowFirstArrayCursor(cursor, window), nil
-	case datatypes.AggregateTypeLast:
+	case datatypes.Aggregate_AggregateTypeLast:
 		return newWindowLastArrayCursor(cursor, window), nil
-	case datatypes.AggregateTypeMin:
+	case datatypes.Aggregate_AggregateTypeMin:
 		return newWindowMinArrayCursor(cursor, window), nil
-	case datatypes.AggregateTypeMax:
+	case datatypes.Aggregate_AggregateTypeMax:
 		return newWindowMaxArrayCursor(cursor, window), nil
-	case datatypes.AggregateTypeMean:
+	case datatypes.Aggregate_AggregateTypeMean:
 		return newWindowMeanArrayCursor(cursor, window)
 	default:
 		// TODO(sgc): should be validated higher up
@@ -71,13 +71,19 @@ type multiShardArrayCursors struct {
 	}
 }
 
+// newMultiShardArrayCursors is a factory for creating cursors for each series key.
+// The range of the cursor is [start, end). The start time is the lower absolute time
+// and the end time is the higher absolute time regardless of ascending or descending order.
 func newMultiShardArrayCursors(ctx context.Context, start, end int64, asc bool) *multiShardArrayCursors {
+	// When we construct the CursorRequest, we translate the time range
+	// from [start, stop) to [start, stop]. The cursor readers from storage are
+	// inclusive on both ends and we perform that conversion here.
 	m := &multiShardArrayCursors{
 		ctx: ctx,
 		req: cursors.CursorRequest{
 			Ascending: asc,
 			StartTime: start,
-			EndTime:   end,
+			EndTime:   end - 1,
 		},
 	}
 

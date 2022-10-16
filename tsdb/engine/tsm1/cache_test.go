@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	"math"
 	"math/rand"
 	"os"
@@ -16,10 +15,16 @@ import (
 	"testing"
 
 	"github.com/golang/snappy"
+	"github.com/influxdata/influxdb/v2/tsdb"
 )
 
+// Convenience method for testing.
+func (c *Cache) Write(key []byte, values []Value) error {
+	return c.WriteMulti(map[string][]Value{string(key): values})
+}
+
 func TestCache_NewCache(t *testing.T) {
-	c := NewCache(100)
+	c := NewCache(100, tsdb.EngineTags{})
 	if c == nil {
 		t.Fatalf("failed to create new cache")
 	}
@@ -35,51 +40,6 @@ func TestCache_NewCache(t *testing.T) {
 	}
 }
 
-func TestCache_CacheWrite(t *testing.T) {
-	v0 := NewValue(1, 1.0)
-	v1 := NewValue(2, 2.0)
-	v2 := NewValue(3, 3.0)
-	values := Values{v0, v1, v2}
-	valuesSize := uint64(v0.Size() + v1.Size() + v2.Size())
-
-	c := NewCache(3 * valuesSize)
-
-	if err := c.Write([]byte("foo"), values); err != nil {
-		t.Fatalf("failed to write key foo to cache: %s", err.Error())
-	}
-	if err := c.Write([]byte("bar"), values); err != nil {
-		t.Fatalf("failed to write key foo to cache: %s", err.Error())
-	}
-	if n := c.Size(); n != 2*valuesSize+6 {
-		t.Fatalf("cache size incorrect after 2 writes, exp %d, got %d", 2*valuesSize, n)
-	}
-
-	if exp, keys := [][]byte{[]byte("bar"), []byte("foo")}, c.Keys(); !reflect.DeepEqual(keys, exp) {
-		t.Fatalf("cache keys incorrect after 2 writes, exp %v, got %v", exp, keys)
-	}
-}
-
-func TestCache_CacheWrite_TypeConflict(t *testing.T) {
-	v0 := NewValue(1, 1.0)
-	v1 := NewValue(2, int(64))
-	values := Values{v0, v1}
-	valuesSize := v0.Size() + v1.Size()
-
-	c := NewCache(uint64(2 * valuesSize))
-
-	if err := c.Write([]byte("foo"), values[:1]); err != nil {
-		t.Fatalf("failed to write key foo to cache: %s", err.Error())
-	}
-
-	if err := c.Write([]byte("foo"), values[1:]); err == nil {
-		t.Fatalf("expected field type conflict")
-	}
-
-	if exp, got := uint64(v0.Size())+3, c.Size(); exp != got {
-		t.Fatalf("cache size incorrect after 2 writes, exp %d, got %d", exp, got)
-	}
-}
-
 func TestCache_CacheWriteMulti(t *testing.T) {
 	v0 := NewValue(1, 1.0)
 	v1 := NewValue(2, 2.0)
@@ -87,7 +47,7 @@ func TestCache_CacheWriteMulti(t *testing.T) {
 	values := Values{v0, v1, v2}
 	valuesSize := uint64(v0.Size() + v1.Size() + v2.Size())
 
-	c := NewCache(30 * valuesSize)
+	c := NewCache(30*valuesSize, tsdb.EngineTags{})
 
 	if err := c.WriteMulti(map[string][]Value{"foo": values, "bar": values}); err != nil {
 		t.Fatalf("failed to write key foo to cache: %s", err.Error())
@@ -104,7 +64,7 @@ func TestCache_CacheWriteMulti(t *testing.T) {
 // Tests that the cache stats and size are correctly maintained during writes.
 func TestCache_WriteMulti_Stats(t *testing.T) {
 	limit := uint64(1)
-	c := NewCache(limit)
+	c := NewCache(limit, tsdb.EngineTags{})
 	ms := NewTestStore()
 	c.store = ms
 
@@ -116,7 +76,7 @@ func TestCache_WriteMulti_Stats(t *testing.T) {
 	}
 
 	// Fail one of the values in the write.
-	c = NewCache(50)
+	c = NewCache(50, tsdb.EngineTags{})
 	c.init()
 	c.store = ms
 
@@ -136,13 +96,6 @@ func TestCache_WriteMulti_Stats(t *testing.T) {
 	if got, exp := c.Size(), uint64(16)+3; got != exp {
 		t.Fatalf("got %v, expected %v", got, exp)
 	}
-
-	// Write stats updated
-	if got, exp := c.stats.WriteDropped, int64(1); got != exp {
-		t.Fatalf("got %v, expected %v", got, exp)
-	} else if got, exp := c.stats.WriteErr, int64(1); got != exp {
-		t.Fatalf("got %v, expected %v", got, exp)
-	}
 }
 
 func TestCache_CacheWriteMulti_TypeConflict(t *testing.T) {
@@ -152,7 +105,7 @@ func TestCache_CacheWriteMulti_TypeConflict(t *testing.T) {
 	values := Values{v0, v1, v2}
 	valuesSize := uint64(v0.Size() + v1.Size() + v2.Size())
 
-	c := NewCache(3 * valuesSize)
+	c := NewCache(3*valuesSize, tsdb.EngineTags{})
 
 	if err := c.WriteMulti(map[string][]Value{"foo": values[:1], "bar": values[1:]}); err == nil {
 		t.Fatalf(" expected field type conflict")
@@ -174,7 +127,7 @@ func TestCache_Cache_DeleteRange(t *testing.T) {
 	values := Values{v0, v1, v2}
 	valuesSize := uint64(v0.Size() + v1.Size() + v2.Size())
 
-	c := NewCache(30 * valuesSize)
+	c := NewCache(30*valuesSize, tsdb.EngineTags{})
 
 	if err := c.WriteMulti(map[string][]Value{"foo": values, "bar": values}); err != nil {
 		t.Fatalf("failed to write key foo to cache: %s", err.Error())
@@ -213,7 +166,7 @@ func TestCache_DeleteRange_NoValues(t *testing.T) {
 	values := Values{v0, v1, v2}
 	valuesSize := uint64(v0.Size() + v1.Size() + v2.Size())
 
-	c := NewCache(3 * valuesSize)
+	c := NewCache(3*valuesSize, tsdb.EngineTags{})
 
 	if err := c.WriteMulti(map[string][]Value{"foo": values}); err != nil {
 		t.Fatalf("failed to write key foo to cache: %s", err.Error())
@@ -248,7 +201,7 @@ func TestCache_DeleteRange_NotSorted(t *testing.T) {
 	values := Values{v0, v1, v2}
 	valuesSize := uint64(v0.Size() + v1.Size() + v2.Size())
 
-	c := NewCache(3 * valuesSize)
+	c := NewCache(3*valuesSize, tsdb.EngineTags{})
 
 	if err := c.WriteMulti(map[string][]Value{"foo": values}); err != nil {
 		t.Fatalf("failed to write key foo to cache: %s", err.Error())
@@ -283,7 +236,7 @@ func TestCache_Cache_Delete(t *testing.T) {
 	values := Values{v0, v1, v2}
 	valuesSize := uint64(v0.Size() + v1.Size() + v2.Size())
 
-	c := NewCache(30 * valuesSize)
+	c := NewCache(30*valuesSize, tsdb.EngineTags{})
 
 	if err := c.WriteMulti(map[string][]Value{"foo": values, "bar": values}); err != nil {
 		t.Fatalf("failed to write key foo to cache: %s", err.Error())
@@ -316,7 +269,7 @@ func TestCache_Cache_Delete(t *testing.T) {
 }
 
 func TestCache_Cache_Delete_NonExistent(t *testing.T) {
-	c := NewCache(1024)
+	c := NewCache(1024, tsdb.EngineTags{})
 
 	c.Delete([][]byte{[]byte("bar")})
 
@@ -337,7 +290,7 @@ func TestCache_CacheWriteMulti_Duplicates(t *testing.T) {
 	v5 := NewValue(5, 3.0)
 	values1 := Values{v3, v4, v5}
 
-	c := NewCache(0)
+	c := NewCache(0, tsdb.EngineTags{})
 
 	if err := c.WriteMulti(map[string][]Value{"foo": values0}); err != nil {
 		t.Fatalf("failed to write key foo to cache: %s", err.Error())
@@ -367,7 +320,7 @@ func TestCache_CacheValues(t *testing.T) {
 	v3 := NewValue(1, 1.0)
 	v4 := NewValue(4, 4.0)
 
-	c := NewCache(512)
+	c := NewCache(512, tsdb.EngineTags{})
 	if deduped := c.Values([]byte("no such key")); deduped != nil {
 		t.Fatalf("Values returned for no such key")
 	}
@@ -395,7 +348,7 @@ func TestCache_CacheSnapshot(t *testing.T) {
 	v6 := NewValue(7, 5.0)
 	v7 := NewValue(2, 5.0)
 
-	c := NewCache(512)
+	c := NewCache(512, tsdb.EngineTags{})
 	if err := c.Write([]byte("foo"), Values{v0, v1, v2, v3}); err != nil {
 		t.Fatalf("failed to write 3 values, key foo to cache: %s", err.Error())
 	}
@@ -472,15 +425,11 @@ func TestCache_CacheSnapshot(t *testing.T) {
 // Tests that Snapshot updates statistics correctly.
 func TestCache_Snapshot_Stats(t *testing.T) {
 	limit := uint64(16)
-	c := NewCache(limit)
+	c := NewCache(limit, tsdb.EngineTags{})
 
 	values := map[string][]Value{"foo": {NewValue(1, 1.0)}}
 	if err := c.WriteMulti(values); err != nil {
 		t.Fatal(err)
-	}
-
-	if got, exp := c.stats.MemSizeBytes, int64(16)+3; got != exp {
-		t.Fatalf("got %v, expected %v", got, exp)
 	}
 
 	_, err := c.Snapshot()
@@ -492,19 +441,10 @@ func TestCache_Snapshot_Stats(t *testing.T) {
 	if got, exp := c.Size(), uint64(16)+3; got != exp {
 		t.Fatalf("got %v, expected %v", got, exp)
 	}
-
-	// Cached bytes should have been increased.
-	if got, exp := c.stats.CachedBytes, int64(16)+3; got != exp {
-		t.Fatalf("got %v, expected %v", got, exp)
-	}
-
-	if got, exp := c.stats.MemSizeBytes, int64(16)+3; got != exp {
-		t.Fatalf("got %v, expected %v", got, exp)
-	}
 }
 
 func TestCache_CacheEmptySnapshot(t *testing.T) {
-	c := NewCache(512)
+	c := NewCache(512, tsdb.EngineTags{})
 
 	// Grab snapshot, and ensure it's as expected.
 	snapshot, err := c.Snapshot()
@@ -531,7 +471,7 @@ func TestCache_CacheWriteMemoryExceeded(t *testing.T) {
 	v0 := NewValue(1, 1.0)
 	v1 := NewValue(2, 2.0)
 
-	c := NewCache(uint64(v1.Size()))
+	c := NewCache(uint64(v1.Size()), tsdb.EngineTags{})
 
 	if err := c.Write([]byte("foo"), Values{v0}); err != nil {
 		t.Fatalf("failed to write key foo to cache: %s", err.Error())
@@ -577,7 +517,7 @@ func TestCache_Deduplicate_Concurrent(t *testing.T) {
 	}
 
 	wg := sync.WaitGroup{}
-	c := NewCache(1000000)
+	c := NewCache(1000000, tsdb.EngineTags{})
 
 	wg.Add(1)
 	go func() {
@@ -629,7 +569,7 @@ func TestCacheLoader_LoadSingle(t *testing.T) {
 	}
 
 	// Load the cache using the segment.
-	cache := NewCache(1024)
+	cache := NewCache(1024, tsdb.EngineTags{})
 	loader := NewCacheLoader([]string{f.Name()})
 	if err := loader.Load(cache); err != nil {
 		t.Fatalf("failed to load cache: %s", err.Error())
@@ -652,7 +592,7 @@ func TestCacheLoader_LoadSingle(t *testing.T) {
 	}
 
 	// Reload the cache using the segment.
-	cache = NewCache(1024)
+	cache = NewCache(1024, tsdb.EngineTags{})
 	loader = NewCacheLoader([]string{f.Name()})
 	if err := loader.Load(cache); err != nil {
 		t.Fatalf("failed to load cache: %s", err.Error())
@@ -714,7 +654,7 @@ func TestCacheLoader_LoadDouble(t *testing.T) {
 	}
 
 	// Load the cache using the segments.
-	cache := NewCache(1024)
+	cache := NewCache(1024, tsdb.EngineTags{})
 	loader := NewCacheLoader([]string{f1.Name(), f2.Name()})
 	if err := loader.Load(cache); err != nil {
 		t.Fatalf("failed to load cache: %s", err.Error())
@@ -778,7 +718,7 @@ func TestCacheLoader_LoadDeleted(t *testing.T) {
 	}
 
 	// Load the cache using the segment.
-	cache := NewCache(1024)
+	cache := NewCache(1024, tsdb.EngineTags{})
 	loader := NewCacheLoader([]string{f.Name()})
 	if err := loader.Load(cache); err != nil {
 		t.Fatalf("failed to load cache: %s", err.Error())
@@ -790,7 +730,7 @@ func TestCacheLoader_LoadDeleted(t *testing.T) {
 	}
 
 	// Reload the cache using the segment.
-	cache = NewCache(1024)
+	cache = NewCache(1024, tsdb.EngineTags{})
 	loader = NewCacheLoader([]string{f.Name()})
 	if err := loader.Load(cache); err != nil {
 		t.Fatalf("failed to load cache: %s", err.Error())
@@ -809,7 +749,7 @@ func TestCache_Split(t *testing.T) {
 	values := Values{v0, v1, v2}
 	valuesSize := uint64(v0.Size() + v1.Size() + v2.Size())
 
-	c := NewCache(0)
+	c := NewCache(0, tsdb.EngineTags{})
 
 	if err := c.Write([]byte("foo"), values); err != nil {
 		t.Fatalf("failed to write key foo to cache: %s", err.Error())
@@ -842,7 +782,7 @@ func TestCache_Split(t *testing.T) {
 }
 
 func mustTempDir() string {
-	dir, err := ioutil.TempDir("", "tsm1-test")
+	dir, err := os.MkdirTemp("", "tsm1-test")
 	if err != nil {
 		panic(fmt.Sprintf("failed to create temp dir: %v", err))
 	}
@@ -850,7 +790,7 @@ func mustTempDir() string {
 }
 
 func mustTempFile(dir string) *os.File {
-	f, err := ioutil.TempFile(dir, "tsm1test")
+	f, err := os.CreateTemp(dir, "tsm1test")
 	if err != nil {
 		panic(fmt.Sprintf("failed to create temp file: %v", err))
 	}
@@ -873,7 +813,6 @@ func mustMarshalEntry(entry WALEntry) (WalEntryType, []byte) {
 type TestStore struct {
 	entryf       func(key []byte) *entry
 	writef       func(key []byte, values Values) (bool, error)
-	addf         func(key []byte, entry *entry)
 	removef      func(key []byte)
 	keysf        func(sorted bool) [][]byte
 	applyf       func(f func([]byte, *entry) error) error
@@ -886,7 +825,6 @@ type TestStore struct {
 func NewTestStore() *TestStore                                      { return &TestStore{} }
 func (s *TestStore) entry(key []byte) *entry                        { return s.entryf(key) }
 func (s *TestStore) write(key []byte, values Values) (bool, error)  { return s.writef(key, values) }
-func (s *TestStore) add(key []byte, entry *entry)                   { s.addf(key, entry) }
 func (s *TestStore) remove(key []byte)                              { s.removef(key) }
 func (s *TestStore) keys(sorted bool) [][]byte                      { return s.keysf(sorted) }
 func (s *TestStore) apply(f func([]byte, *entry) error) error       { return s.applyf(f) }
@@ -898,7 +836,7 @@ func (s *TestStore) count() int                                     { return s.c
 var fvSize = uint64(NewValue(1, float64(1)).Size())
 
 func BenchmarkCacheFloatEntries(b *testing.B) {
-	cache := NewCache(uint64(b.N) * fvSize)
+	cache := NewCache(uint64(b.N)*fvSize, tsdb.EngineTags{})
 	vals := make([][]Value, b.N)
 	for i := 0; i < b.N; i++ {
 		vals[i] = []Value{NewValue(1, float64(i))}
@@ -919,7 +857,7 @@ type points struct {
 
 func BenchmarkCacheParallelFloatEntries(b *testing.B) {
 	c := b.N * runtime.GOMAXPROCS(0)
-	cache := NewCache(uint64(c) * fvSize * 10)
+	cache := NewCache(uint64(c)*fvSize*10, tsdb.EngineTags{})
 	vals := make([]points, c)
 	for i := 0; i < c; i++ {
 		v := make([]Value, 10)

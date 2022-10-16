@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	platform "github.com/influxdata/influxdb/v2"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
 )
 
 var mappingCmpOptions = cmp.Options{
@@ -212,8 +213,8 @@ func DeleteUserResourceMapping(
 	t *testing.T,
 ) {
 	type args struct {
-		resourceID platform.ID
-		userID     platform.ID
+		resourceID platform2.ID
+		userID     platform2.ID
 	}
 	type wants struct {
 		err      error

@@ -13,8 +13,10 @@ import (
 	pcontext "github.com/influxdata/influxdb/v2/context"
 	"github.com/influxdata/influxdb/v2/influxql"
 	imock "github.com/influxdata/influxdb/v2/influxql/mock"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"github.com/influxdata/influxdb/v2/mock"
+	"go.uber.org/zap/zaptest"
 )
 
 var cmpOpts = []cmp.Option{
@@ -41,8 +43,6 @@ var cmpOpts = []cmp.Option{
 }
 
 func TestInfluxQLdHandler_HandleQuery(t *testing.T) {
-	t.Skip("almost good to go, only unexpected content types")
-
 	ctx := context.Background()
 
 	type fields struct {
@@ -61,7 +61,6 @@ func TestInfluxQLdHandler_HandleQuery(t *testing.T) {
 		wantCode   int
 		wantHeader http.Header
 		wantBody   []byte
-		wantLogs   []string
 	}{
 		{
 			name: "no token causes http error",
@@ -96,8 +95,8 @@ func TestInfluxQLdHandler_HandleQuery(t *testing.T) {
 			fields: fields{
 				OrganizationService: &mock.OrganizationService{
 					FindOrganizationF: func(ctx context.Context, filter platform.OrganizationFilter) (*platform.Organization, error) {
-						return nil, &platform.Error{
-							Code: platform.EForbidden,
+						return nil, &errors.Error{
+							Code: errors.EForbidden,
 							Msg:  "nope",
 						}
 					},
@@ -125,8 +124,8 @@ func TestInfluxQLdHandler_HandleQuery(t *testing.T) {
 				},
 				ProxyQueryService: &imock.ProxyQueryService{
 					QueryF: func(ctx context.Context, w io.Writer, req *influxql.QueryRequest) (influxql.Statistics, error) {
-						return influxql.Statistics{}, &platform.Error{
-							Code: platform.EUnprocessableEntity,
+						return influxql.Statistics{}, &errors.Error{
+							Code: errors.EUnprocessableEntity,
 							Msg:  "bad query",
 						}
 					},
@@ -155,8 +154,8 @@ func TestInfluxQLdHandler_HandleQuery(t *testing.T) {
 				ProxyQueryService: &imock.ProxyQueryService{
 					QueryF: func(ctx context.Context, w io.Writer, req *influxql.QueryRequest) (influxql.Statistics, error) {
 						_, _ = io.WriteString(w, "fail")
-						return influxql.Statistics{}, &platform.Error{
-							Code: platform.EInternal,
+						return influxql.Statistics{}, &errors.Error{
+							Code: errors.EInternal,
 							Msg:  "during query",
 						}
 					},
@@ -189,15 +188,14 @@ func TestInfluxQLdHandler_HandleQuery(t *testing.T) {
 				},
 			},
 			args: args{
-				r: WithHeader(httptest.NewRequest("POST", "/query", nil).WithContext(ctx), "Accept", "text/csv"),
+				r: WithHeader(httptest.NewRequest("POST", "/query", nil).WithContext(ctx), "Accept", "application/foo"),
 				w: httptest.NewRecorder(),
 			},
 			wantBody: []byte("good"),
 			wantCode: http.StatusOK,
 			wantHeader: http.Header{
-				"Content-Type": {"text/csv"},
+				"Content-Type": {"application/json"},
 			},
-			wantLogs: []string{"text/csv"},
 		},
 		{
 			name:    "good query",
@@ -229,12 +227,13 @@ func TestInfluxQLdHandler_HandleQuery(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			b := &InfluxQLBackend{
-				HTTPErrorHandler:      kithttp.ErrorHandler(0),
+				HTTPErrorHandler:      kithttp.NewErrorHandler(zaptest.NewLogger(t)),
 				OrganizationService:   tt.fields.OrganizationService,
 				InfluxqldQueryService: tt.fields.ProxyQueryService,
 			}
 
-			h := NewInfluxQLHandler(b, HandlerConfig{})
+			h := NewInfluxQLHandler(b, *NewHandlerConfig())
+			h.Logger = zaptest.NewLogger(t)
 
 			if tt.context != nil {
 				tt.args.r = tt.args.r.WithContext(tt.context)
@@ -255,7 +254,6 @@ func TestInfluxQLdHandler_HandleQuery(t *testing.T) {
 			if got, want := tt.args.w.Body.Bytes(), tt.wantBody; !cmp.Equal(got, want) {
 				t.Errorf("HandleQuery() body = got(-)/want(+) %s", cmp.Diff(string(got), string(want)))
 			}
-
 		})
 	}
 }

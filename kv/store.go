@@ -53,6 +53,10 @@ type Store interface {
 	Backup(ctx context.Context, w io.Writer) error
 	// Restore replaces the underlying data file with the data from r.
 	Restore(ctx context.Context, r io.Reader) error
+	// RLock takes a read lock on the underlying KV store.
+	RLock()
+	// RUnlock releases a previously-taken read lock
+	RUnlock()
 }
 
 // Tx is a transaction in the store.

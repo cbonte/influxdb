@@ -4,7 +4,8 @@ import (
 	"context"
 	"time"
 
-	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/kit/tracing"
 	"github.com/influxdata/influxdb/v2/kv"
 	"github.com/influxdata/influxdb/v2/rand"
@@ -16,9 +17,9 @@ const MaxIDGenerationN = 100
 
 type Store struct {
 	kvStore     kv.Store
-	IDGen       influxdb.IDGenerator
-	OrgIDGen    influxdb.IDGenerator
-	BucketIDGen influxdb.IDGenerator
+	IDGen       platform.IDGenerator
+	OrgIDGen    platform.IDGenerator
+	BucketIDGen platform.IDGenerator
 
 	now func() time.Time
 
@@ -46,6 +47,14 @@ func NewStore(kvStore kv.Store, opts ...StoreOption) *Store {
 	return store
 }
 
+func (s *Store) RLock() {
+	s.kvStore.RLock()
+}
+
+func (s *Store) RUnlock() {
+	s.kvStore.RUnlock()
+}
+
 // View opens up a transaction that will not write to any data. Implementing interfaces
 // should take care to ensure that all view transactions do not mutate any data.
 func (s *Store) View(ctx context.Context, fn func(kv.Tx) error) error {
@@ -59,7 +68,7 @@ func (s *Store) Update(ctx context.Context, fn func(kv.Tx) error) error {
 
 // generateSafeID attempts to create ids for buckets
 // and orgs that are without backslash, commas, and spaces, BUT ALSO do not already exist.
-func (s *Store) generateSafeID(ctx context.Context, tx kv.Tx, bucket []byte, gen influxdb.IDGenerator) (influxdb.ID, error) {
+func (s *Store) generateSafeID(ctx context.Context, tx kv.Tx, bucket []byte, gen platform.IDGenerator) (platform.ID, error) {
 	for i := 0; i < MaxIDGenerationN; i++ {
 		id := gen.ID()
 
@@ -72,20 +81,20 @@ func (s *Store) generateSafeID(ctx context.Context, tx kv.Tx, bucket []byte, gen
 			continue
 		}
 
-		return influxdb.InvalidID(), err
+		return platform.InvalidID(), err
 	}
 
-	return influxdb.InvalidID(), ErrFailureGeneratingID
+	return platform.InvalidID(), ErrFailureGeneratingID
 }
 
-func (s *Store) uniqueID(ctx context.Context, tx kv.Tx, bucket []byte, id influxdb.ID) error {
+func (s *Store) uniqueID(ctx context.Context, tx kv.Tx, bucket []byte, id platform.ID) error {
 	span, _ := tracing.StartSpanFromContext(ctx)
 	defer span.Finish()
 
 	encodedID, err := id.Encode()
 	if err != nil {
-		return &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return &errors.Error{
+			Code: errors.EInvalid,
 			Err:  err,
 		}
 	}

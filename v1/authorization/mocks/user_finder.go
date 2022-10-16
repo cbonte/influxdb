@@ -6,9 +6,11 @@ package mocks
 
 import (
 	context "context"
+	reflect "reflect"
+
 	gomock "github.com/golang/mock/gomock"
 	influxdb "github.com/influxdata/influxdb/v2"
-	reflect "reflect"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 )
 
 // MockUserFinder is a mock of UserFinder interface
@@ -35,7 +37,7 @@ func (m *MockUserFinder) EXPECT() *MockUserFinderMockRecorder {
 }
 
 // FindUserByID mocks base method
-func (m *MockUserFinder) FindUserByID(arg0 context.Context, arg1 influxdb.ID) (*influxdb.User, error) {
+func (m *MockUserFinder) FindUserByID(arg0 context.Context, arg1 platform.ID) (*influxdb.User, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "FindUserByID", arg0, arg1)
 	ret0, _ := ret[0].(*influxdb.User)

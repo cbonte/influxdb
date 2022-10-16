@@ -1,11 +1,13 @@
 package prometheus
 
 import (
+	"fmt"
 	"sort"
+	"strings"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"google.golang.org/protobuf/proto"
 )
 
 var _ prometheus.Gatherer = (*Filter)(nil)
@@ -33,7 +35,7 @@ func NewMatcher() Matcher {
 	return Matcher{}
 }
 
-// Family helps constuct match by adding a metric family to match to.
+// Family helps construct match by adding a metric family to match to.
 func (m Matcher) Family(name string, lps ...*dto.LabelPair) Matcher {
 	// prometheus metrics labels are sorted by label name.
 	sort.Slice(lps, func(i, j int) bool {
@@ -113,6 +115,14 @@ type labelPairs struct {
 	Label []*dto.LabelPair `protobuf:"bytes,1,rep,name=label" json:"label,omitempty"`
 }
 
-func (l *labelPairs) Reset()         {}
-func (l *labelPairs) String() string { return proto.CompactTextString(l) }
-func (*labelPairs) ProtoMessage()    {}
+func (l *labelPairs) Reset() {}
+
+func (l *labelPairs) String() string {
+	var a []string
+	for _, lbl := range l.Label {
+		a = append(a, fmt.Sprintf("label:<%s> ", lbl.String()))
+	}
+	return strings.Join(a, "")
+}
+
+func (*labelPairs) ProtoMessage() {}

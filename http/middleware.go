@@ -133,11 +133,11 @@ const (
 
 // TODO(@jsteenb2): make this a stronger type that handlers can register routes that should not be logged.
 var blacklistEndpoints = map[string]isValidMethodFn{
-	prefixSignIn:                     ignoreMethod(),
-	prefixSignOut:                    ignoreMethod(),
-	prefixMe:                         ignoreMethod(),
-	mePasswordPath:                   ignoreMethod(),
-	usersPasswordPath:                ignoreMethod(),
+	"/api/v2/signin":                 ignoreMethod(),
+	"/api/v2/signout":                ignoreMethod(),
+	"/api/v2/me":                     ignoreMethod(),
+	"/api/v2/me/password":            ignoreMethod(),
+	"/api/v2/users/:id/password":     ignoreMethod(),
 	"/api/v2/packages/apply":         ignoreMethod(),
 	prefixWrite:                      ignoreMethod("POST"),
 	"/write":                         ignoreMethod("POST"),
@@ -146,6 +146,12 @@ var blacklistEndpoints = map[string]isValidMethodFn{
 	prefixSetup:                      ignoreMethod("POST"),
 	prefixNotificationEndpoints:      ignoreMethod("POST"),
 	notificationEndpointsIDPath:      ignoreMethod("PUT"),
+	restoreKVPath:                    ignoreMethod(),
+	restoreSqlPath:                   ignoreMethod(),
+	restoreBucketPath:                ignoreMethod(),
+	restoreShardPath:                 ignoreMethod(),
+	"/api/v2/remotes":                ignoreMethod("POST"),
+	"/api/v2/remotes/:id":            ignoreMethod("PATCH"),
 }
 
 type bodyEchoer struct {

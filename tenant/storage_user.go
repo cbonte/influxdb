@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kv"
 )
 
@@ -33,7 +34,7 @@ func marshalUser(u *influxdb.User) ([]byte, error) {
 	return v, nil
 }
 
-func (s *Store) uniqueUserName(ctx context.Context, tx kv.Tx, uname string) error {
+func (s *Store) uniqueUserName(tx kv.Tx, uname string) error {
 
 	idx, err := tx.Bucket(userIndex)
 	if err != nil {
@@ -55,7 +56,27 @@ func (s *Store) uniqueUserName(ctx context.Context, tx kv.Tx, uname string) erro
 	return ErrUnprocessableUser(err)
 }
 
-func (s *Store) GetUser(ctx context.Context, tx kv.Tx, id influxdb.ID) (*influxdb.User, error) {
+func (s *Store) uniqueUserID(tx kv.Tx, id platform.ID) error {
+	encodedID, _ := id.Encode()
+
+	b, err := tx.Bucket(userBucket)
+	if err != nil {
+		return err
+	}
+
+	_, err = b.Get(encodedID)
+	if kv.IsNotFound(err) {
+		return nil
+	}
+
+	if err == nil {
+		return UserIDAlreadyExistsError(id.String())
+	}
+
+	return ErrUnprocessableUser(err)
+}
+
+func (s *Store) GetUser(ctx context.Context, tx kv.Tx, id platform.ID) (*influxdb.User, error) {
 	encodedID, err := id.Encode()
 	if err != nil {
 		return nil, InvalidUserIDError(err)
@@ -93,31 +114,39 @@ func (s *Store) GetUserByName(ctx context.Context, tx kv.Tx, n string) (*influxd
 		return nil, ErrInternalServiceError(err)
 	}
 
-	var id influxdb.ID
+	var id platform.ID
 	if err := id.Decode(uid); err != nil {
-		return nil, influxdb.ErrCorruptID(err)
+		return nil, platform.ErrCorruptID(err)
 	}
 	return s.GetUser(ctx, tx, id)
 }
 
 func (s *Store) ListUsers(ctx context.Context, tx kv.Tx, opt ...influxdb.FindOptions) ([]*influxdb.User, error) {
-	// if we dont have any options it would be irresponsible to just give back all users in the system
 	if len(opt) == 0 {
-		opt = append(opt, influxdb.FindOptions{
-			Limit: influxdb.DefaultPageSize,
-		})
+		opt = append(opt, influxdb.FindOptions{})
 	}
 	o := opt[0]
-	if o.Limit > influxdb.MaxPageSize || o.Limit == 0 {
-		o.Limit = influxdb.MaxPageSize
-	}
 
 	b, err := tx.Bucket(userBucket)
 	if err != nil {
 		return nil, err
 	}
 
-	cursor, err := b.ForwardCursor(nil)
+	var opts []kv.CursorOption
+	if o.Descending {
+		opts = append(opts, kv.WithCursorDirection(kv.CursorDescending))
+	}
+
+	var seek []byte
+	if o.After != nil {
+		after := (*o.After) + 1
+		seek, err = after.Encode()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	cursor, err := b.ForwardCursor(seek, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -137,7 +166,7 @@ func (s *Store) ListUsers(ctx context.Context, tx kv.Tx, opt ...influxdb.FindOpt
 
 		us = append(us, u)
 
-		if len(us) >= o.Limit {
+		if o.Limit != 0 && len(us) >= o.Limit {
 			break
 		}
 	}
@@ -155,7 +184,11 @@ func (s *Store) CreateUser(ctx context.Context, tx kv.Tx, u *influxdb.User) erro
 		return InvalidUserIDError(err)
 	}
 
-	if err := s.uniqueUserName(ctx, tx, u.Name); err != nil {
+	// Verify that both the provided username and user ID are not already in-use
+	if err := s.uniqueUserName(tx, u.Name); err != nil {
+		return err
+	}
+	if err := s.uniqueUserID(tx, u.ID); err != nil {
 		return err
 	}
 
@@ -185,7 +218,7 @@ func (s *Store) CreateUser(ctx context.Context, tx kv.Tx, u *influxdb.User) erro
 	return nil
 }
 
-func (s *Store) UpdateUser(ctx context.Context, tx kv.Tx, id influxdb.ID, upd influxdb.UserUpdate) (*influxdb.User, error) {
+func (s *Store) UpdateUser(ctx context.Context, tx kv.Tx, id platform.ID, upd influxdb.UserUpdate) (*influxdb.User, error) {
 	encodedID, err := id.Encode()
 	if err != nil {
 		return nil, err
@@ -197,7 +230,7 @@ func (s *Store) UpdateUser(ctx context.Context, tx kv.Tx, id influxdb.ID, upd in
 	}
 
 	if upd.Name != nil && *upd.Name != u.Name {
-		if err := s.uniqueUserName(ctx, tx, *upd.Name); err != nil {
+		if err := s.uniqueUserName(tx, *upd.Name); err != nil {
 			return nil, err
 		}
 
@@ -237,7 +270,7 @@ func (s *Store) UpdateUser(ctx context.Context, tx kv.Tx, id influxdb.ID, upd in
 	return u, nil
 }
 
-func (s *Store) DeleteUser(ctx context.Context, tx kv.Tx, id influxdb.ID) error {
+func (s *Store) DeleteUser(ctx context.Context, tx kv.Tx, id platform.ID) error {
 	u, err := s.GetUser(ctx, tx, id)
 	if err != nil {
 		return err
@@ -291,7 +324,7 @@ func (s *Store) DeleteUser(ctx context.Context, tx kv.Tx, id influxdb.ID) error 
 	return aggErr.Err()
 }
 
-func (s *Store) GetPassword(ctx context.Context, tx kv.Tx, id influxdb.ID) (string, error) {
+func (s *Store) GetPassword(ctx context.Context, tx kv.Tx, id platform.ID) (string, error) {
 	encodedID, err := id.Encode()
 	if err != nil {
 		return "", InvalidUserIDError(err)
@@ -307,7 +340,7 @@ func (s *Store) GetPassword(ctx context.Context, tx kv.Tx, id influxdb.ID) (stri
 	return string(passwd), err
 }
 
-func (s *Store) SetPassword(ctx context.Context, tx kv.Tx, id influxdb.ID, password string) error {
+func (s *Store) SetPassword(ctx context.Context, tx kv.Tx, id platform.ID, password string) error {
 	encodedID, err := id.Encode()
 	if err != nil {
 		return InvalidUserIDError(err)
@@ -321,7 +354,7 @@ func (s *Store) SetPassword(ctx context.Context, tx kv.Tx, id influxdb.ID, passw
 	return b.Put(encodedID, []byte(password))
 }
 
-func (s *Store) DeletePassword(ctx context.Context, tx kv.Tx, id influxdb.ID) error {
+func (s *Store) DeletePassword(ctx context.Context, tx kv.Tx, id platform.ID) error {
 	encodedID, err := id.Encode()
 	if err != nil {
 		return InvalidUserIDError(err)

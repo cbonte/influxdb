@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,6 +14,8 @@ import (
 	"github.com/influxdata/influxdb/v2"
 	influxdbhttp "github.com/influxdata/influxdb/v2/http"
 	"github.com/influxdata/influxdb/v2/inmem"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/kv/migration/all"
 	"github.com/influxdata/influxdb/v2/mock"
 	influxdbtesting "github.com/influxdata/influxdb/v2/testing"
@@ -73,7 +75,7 @@ func TestSecretService_handleGetSecrets(t *testing.T) {
 		SecretService influxdb.SecretService
 	}
 	type args struct {
-		orgID influxdb.ID
+		orgID platform.ID
 	}
 	type wants struct {
 		statusCode  int
@@ -91,7 +93,7 @@ func TestSecretService_handleGetSecrets(t *testing.T) {
 			name: "get basic secrets",
 			fields: fields{
 				&mock.SecretService{
-					GetSecretKeysFn: func(ctx context.Context, orgID influxdb.ID) ([]string, error) {
+					GetSecretKeysFn: func(ctx context.Context, orgID platform.ID) ([]string, error) {
 						return []string{"hello", "world"}, nil
 					},
 				},
@@ -109,7 +111,7 @@ func TestSecretService_handleGetSecrets(t *testing.T) {
 			name: "get secrets when there are none",
 			fields: fields{
 				&mock.SecretService{
-					GetSecretKeysFn: func(ctx context.Context, orgID influxdb.ID) ([]string, error) {
+					GetSecretKeysFn: func(ctx context.Context, orgID platform.ID) ([]string, error) {
 						return []string{}, nil
 					},
 				},
@@ -127,9 +129,9 @@ func TestSecretService_handleGetSecrets(t *testing.T) {
 			name: "get secrets when organization has no secret keys",
 			fields: fields{
 				&mock.SecretService{
-					GetSecretKeysFn: func(ctx context.Context, orgID influxdb.ID) ([]string, error) {
-						return []string{}, &influxdb.Error{
-							Code: influxdb.ENotFound,
+					GetSecretKeysFn: func(ctx context.Context, orgID platform.ID) ([]string, error) {
+						return []string{}, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "organization has no secret keys",
 						}
 
@@ -161,7 +163,7 @@ func TestSecretService_handleGetSecrets(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("handleGetSecrets() = %v, want %v", res.StatusCode, tt.wants.statusCode)
@@ -183,7 +185,7 @@ func TestSecretService_handlePatchSecrets(t *testing.T) {
 		SecretService influxdb.SecretService
 	}
 	type args struct {
-		orgID   influxdb.ID
+		orgID   platform.ID
 		secrets map[string]string
 	}
 	type wants struct {
@@ -202,7 +204,7 @@ func TestSecretService_handlePatchSecrets(t *testing.T) {
 			name: "get basic secrets",
 			fields: fields{
 				&mock.SecretService{
-					PatchSecretsFn: func(ctx context.Context, orgID influxdb.ID, s map[string]string) error {
+					PatchSecretsFn: func(ctx context.Context, orgID platform.ID, s map[string]string) error {
 						return nil
 					},
 				},
@@ -239,7 +241,7 @@ func TestSecretService_handlePatchSecrets(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("handlePatchSecrets() = %v, want %v", res.StatusCode, tt.wants.statusCode)
@@ -262,7 +264,7 @@ func TestSecretService_handleDeleteSecrets(t *testing.T) {
 		SecretService influxdb.SecretService
 	}
 	type args struct {
-		orgID   influxdb.ID
+		orgID   platform.ID
 		secrets []string
 	}
 	type wants struct {
@@ -281,7 +283,7 @@ func TestSecretService_handleDeleteSecrets(t *testing.T) {
 			name: "get basic secrets",
 			fields: fields{
 				&mock.SecretService{
-					DeleteSecretFn: func(ctx context.Context, orgID influxdb.ID, s ...string) error {
+					DeleteSecretFn: func(ctx context.Context, orgID platform.ID, s ...string) error {
 						return nil
 					},
 				},
@@ -322,7 +324,78 @@ func TestSecretService_handleDeleteSecrets(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
+
+			if res.StatusCode != tt.wants.statusCode {
+				t.Errorf("handleDeleteSecrets() = %v, want %v", res.StatusCode, tt.wants.statusCode)
+			}
+			if tt.wants.contentType != "" && content != tt.wants.contentType {
+				t.Errorf("handleDeleteSecrets() = %v, want %v", content, tt.wants.contentType)
+			}
+			if tt.wants.body != "" {
+				if string(body) != tt.wants.body {
+					t.Errorf("%q. handleDeleteSecrets() invalid body", tt.name)
+				}
+			}
+
+		})
+	}
+}
+
+func TestSecretService_handleDeleteSecret(t *testing.T) {
+	type fields struct {
+		SecretService influxdb.SecretService
+	}
+	type args struct {
+		orgID    platform.ID
+		secretID string
+	}
+	type wants struct {
+		statusCode  int
+		contentType string
+		body        string
+	}
+
+	tests := []struct {
+		name   string
+		fields fields
+		args   args
+		wants  wants
+	}{
+		{
+			name: "delete secret",
+			fields: fields{
+				&mock.SecretService{
+					DeleteSecretFn: func(ctx context.Context, orgID platform.ID, s ...string) error {
+						return nil
+					},
+				},
+			},
+			args: args{
+				orgID:    1,
+				secretID: "abc",
+			},
+			wants: wants{
+				statusCode: http.StatusNoContent,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := NewHandler(zaptest.NewLogger(t), "id", tt.fields.SecretService)
+			router := chi.NewRouter()
+			router.Mount("/api/v2/orgs/{id}/secrets", h)
+
+			u := fmt.Sprintf("http://any.url/api/v2/orgs/%s/secrets/%s", tt.args.orgID, tt.args.secretID)
+			r := httptest.NewRequest("DELETE", u, nil)
+			w := httptest.NewRecorder()
+
+			router.ServeHTTP(w, r)
+
+			res := w.Result()
+			content := res.Header.Get("Content-Type")
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("handleDeleteSecrets() = %v, want %v", res.StatusCode, tt.wants.statusCode)

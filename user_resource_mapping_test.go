@@ -4,15 +4,16 @@ import (
 	"testing"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	influxdbtesting "github.com/influxdata/influxdb/v2/testing"
 	"github.com/stretchr/testify/require"
 )
 
 func TestOwnerMappingValidate(t *testing.T) {
 	type fields struct {
-		ResourceID   influxdb.ID
+		ResourceID   platform.ID
 		ResourceType influxdb.ResourceType
-		UserID       influxdb.ID
+		UserID       platform.ID
 		UserType     influxdb.UserType
 	}
 	tests := []struct {
@@ -107,7 +108,7 @@ func TestOwnerMappingToPermissions(t *testing.T) {
 		err   bool
 	}
 
-	ResourceID, _ := influxdb.IDFromString("020f755c3c082000")
+	ResourceID, _ := platform.IDFromString("020f755c3c082000")
 
 	tests := []struct {
 		name  string

@@ -5,6 +5,7 @@ import (
 
 	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/kit/metric"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/prometheus/client_golang/prometheus"
 )
 
@@ -38,7 +39,7 @@ func (m *UrmMetrics) CreateUserResourceMapping(ctx context.Context, urm *influxd
 	return rec(err)
 }
 
-func (m *UrmMetrics) DeleteUserResourceMapping(ctx context.Context, resourceID, userID influxdb.ID) error {
+func (m *UrmMetrics) DeleteUserResourceMapping(ctx context.Context, resourceID, userID platform.ID) error {
 	rec := m.rec.Record("delete_urm")
 	err := m.urmService.DeleteUserResourceMapping(ctx, resourceID, userID)
 	return rec(err)

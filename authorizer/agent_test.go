@@ -7,6 +7,7 @@ import (
 	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/authorizer"
 	icontext "github.com/influxdata/influxdb/v2/context"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/mock"
 	influxdbtesting "github.com/influxdata/influxdb/v2/testing"
 	"github.com/stretchr/testify/require"
@@ -17,7 +18,7 @@ func Test_Agent(t *testing.T) {
 		tests := []struct {
 			name        string
 			action      influxdb.Action
-			orgID       influxdb.ID
+			orgID       platform.ID
 			permissions []influxdb.Permission
 			shouldErr   bool
 		}{
@@ -175,7 +176,7 @@ func Test_Agent(t *testing.T) {
 		tests := []struct {
 			name         string
 			resourceType influxdb.ResourceType
-			orgID        influxdb.ID
+			orgID        platform.ID
 			permissions  []influxdb.Permission
 			shouldErr    bool
 		}{

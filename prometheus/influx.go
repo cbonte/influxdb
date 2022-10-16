@@ -16,9 +16,7 @@ type influxCollector struct {
 }
 
 // NewInfluxCollector returns a collector which exports influxdb process metrics.
-func NewInfluxCollector(procID platform.IDGenerator, build platform.BuildInfo) prometheus.Collector {
-	id := procID.ID().String()
-
+func NewInfluxCollector(procID string, build platform.BuildInfo) prometheus.Collector {
 	return &influxCollector{
 		influxInfoDesc: prometheus.NewDesc(
 			"influxdb_info",
@@ -36,7 +34,7 @@ func NewInfluxCollector(procID platform.IDGenerator, build platform.BuildInfo) p
 			"influxdb_uptime_seconds",
 			"influxdb process uptime in seconds",
 			nil, prometheus.Labels{
-				"id": id,
+				"id": procID,
 			},
 		),
 		start: time.Now(),

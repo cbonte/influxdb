@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kv"
 )
 
@@ -63,7 +64,7 @@ func marshalOrg(u *influxdb.Organization) ([]byte, error) {
 	return v, nil
 }
 
-func (s *Store) GetOrg(ctx context.Context, tx kv.Tx, id influxdb.ID) (*influxdb.Organization, error) {
+func (s *Store) GetOrg(ctx context.Context, tx kv.Tx, id platform.ID) (*influxdb.Organization, error) {
 	encodedID, err := id.Encode()
 	if err != nil {
 		return nil, InvalidOrgIDError(err)
@@ -101,9 +102,9 @@ func (s *Store) GetOrgByName(ctx context.Context, tx kv.Tx, n string) (*influxdb
 		return nil, ErrInternalServiceError(err)
 	}
 
-	var id influxdb.ID
+	var id platform.ID
 	if err := id.Decode(uid); err != nil {
-		return nil, influxdb.ErrCorruptID(err)
+		return nil, platform.ErrCorruptID(err)
 	}
 	return s.GetOrg(ctx, tx, id)
 }
@@ -111,14 +112,9 @@ func (s *Store) GetOrgByName(ctx context.Context, tx kv.Tx, n string) (*influxdb
 func (s *Store) ListOrgs(ctx context.Context, tx kv.Tx, opt ...influxdb.FindOptions) ([]*influxdb.Organization, error) {
 	// if we dont have any options it would be irresponsible to just give back all orgs in the system
 	if len(opt) == 0 {
-		opt = append(opt, influxdb.FindOptions{
-			Limit: influxdb.DefaultPageSize,
-		})
+		opt = append(opt, influxdb.FindOptions{})
 	}
 	o := opt[0]
-	if o.Limit > influxdb.MaxPageSize || o.Limit == 0 {
-		o.Limit = influxdb.MaxPageSize
-	}
 
 	b, err := tx.Bucket(organizationBucket)
 	if err != nil {
@@ -145,7 +141,7 @@ func (s *Store) ListOrgs(ctx context.Context, tx kv.Tx, opt ...influxdb.FindOpti
 
 		us = append(us, u)
 
-		if len(us) >= o.Limit {
+		if o.Limit != 0 && len(us) >= o.Limit {
 			break
 		}
 	}
@@ -198,7 +194,7 @@ func (s *Store) CreateOrg(ctx context.Context, tx kv.Tx, o *influxdb.Organizatio
 	return nil
 }
 
-func (s *Store) UpdateOrg(ctx context.Context, tx kv.Tx, id influxdb.ID, upd influxdb.OrganizationUpdate) (*influxdb.Organization, error) {
+func (s *Store) UpdateOrg(ctx context.Context, tx kv.Tx, id platform.ID, upd influxdb.OrganizationUpdate) (*influxdb.Organization, error) {
 	encodedID, err := id.Encode()
 	if err != nil {
 		return nil, err
@@ -251,7 +247,7 @@ func (s *Store) UpdateOrg(ctx context.Context, tx kv.Tx, id influxdb.ID, upd inf
 	return u, nil
 }
 
-func (s *Store) DeleteOrg(ctx context.Context, tx kv.Tx, id influxdb.ID) error {
+func (s *Store) DeleteOrg(ctx context.Context, tx kv.Tx, id platform.ID) error {
 	u, err := s.GetOrg(ctx, tx, id)
 	if err != nil {
 		return err

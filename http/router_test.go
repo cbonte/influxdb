@@ -2,7 +2,7 @@ package http
 
 import (
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -83,7 +83,7 @@ func TestRouter_NotFound(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			router := NewRouter(kithttp.ErrorHandler(0))
+			router := NewRouter(kithttp.NewErrorHandler(zaptest.NewLogger(t)))
 			router.HandlerFunc(tt.fields.method, tt.fields.path, tt.fields.handlerFn)
 
 			r := httptest.NewRequest(tt.args.method, tt.args.path, nil)
@@ -92,7 +92,7 @@ func TestRouter_NotFound(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. get %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -190,7 +190,7 @@ func TestRouter_Panic(t *testing.T) {
 			tw := newTestLogWriter(t)
 			panicLogger = zaptest.NewLogger(tw)
 
-			router := NewRouter(kithttp.ErrorHandler(0))
+			router := NewRouter(kithttp.NewErrorHandler(zaptest.NewLogger(t)))
 			router.HandlerFunc(tt.fields.method, tt.fields.path, tt.fields.handlerFn)
 
 			r := httptest.NewRequest(tt.args.method, tt.args.path, nil)
@@ -199,7 +199,7 @@ func TestRouter_Panic(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. get %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -289,7 +289,7 @@ func TestRouter_MethodNotAllowed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			router := NewRouter(kithttp.ErrorHandler(0))
+			router := NewRouter(kithttp.NewErrorHandler(zaptest.NewLogger(t)))
 			router.HandlerFunc(tt.fields.method, tt.fields.path, tt.fields.handlerFn)
 
 			r := httptest.NewRequest(tt.args.method, tt.args.path, nil)
@@ -298,7 +298,7 @@ func TestRouter_MethodNotAllowed(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. get %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)

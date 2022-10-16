@@ -6,9 +6,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/models"
 	"github.com/influxdata/influxdb/v2/storage"
+	"github.com/influxdata/influxdb/v2/task/taskmodel"
 	"go.uber.org/zap"
 )
 
@@ -27,7 +28,7 @@ func NewStoragePointsWriterRecorder(log *zap.Logger, pw storage.PointsWriter) *S
 
 // Record formats the provided run as a models.Point and writes the resulting
 // point to an underlying storage.PointsWriter
-func (s *StoragePointsWriterRecorder) Record(ctx context.Context, orgID influxdb.ID, org string, bucketID influxdb.ID, bucket string, run *influxdb.Run) error {
+func (s *StoragePointsWriterRecorder) Record(ctx context.Context, bucketID platform.ID, bucket string, task *taskmodel.Task, run *taskmodel.Run) error {
 	tags := models.NewTags(map[string]string{
 		statusTag: run.Status,
 		taskIDTag: run.TaskID.String(),
@@ -44,10 +45,14 @@ func (s *StoragePointsWriterRecorder) Record(ctx context.Context, orgID influxdb
 
 	fields := map[string]interface{}{}
 	fields[runIDField] = run.ID.String()
+	fields[nameField] = task.Name
 	fields[startedAtField] = run.StartedAt.Format(time.RFC3339Nano)
 	fields[finishedAtField] = run.FinishedAt.Format(time.RFC3339Nano)
 	fields[scheduledForField] = run.ScheduledFor.Format(time.RFC3339)
 	fields[requestedAtField] = run.RequestedAt.Format(time.RFC3339)
+	fields[fluxField] = run.Flux
+	fields[traceIDField] = run.TraceID
+	fields[traceSampledTag] = run.IsSampled
 
 	startedAt := run.StartedAt
 	if startedAt.IsZero() {
@@ -66,5 +71,5 @@ func (s *StoragePointsWriterRecorder) Record(ctx context.Context, orgID influxdb
 	}
 
 	// TODO - fix
-	return s.pw.WritePoints(ctx, orgID, bucketID, models.Points{point})
+	return s.pw.WritePoints(ctx, task.OrganizationID, bucketID, models.Points{point})
 }

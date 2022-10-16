@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path"
@@ -14,6 +14,8 @@ import (
 	"github.com/influxdata/httprouter"
 	"github.com/influxdata/influxdb/v2"
 	pcontext "github.com/influxdata/influxdb/v2/context"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"github.com/influxdata/influxdb/v2/kv"
 	"github.com/influxdata/influxdb/v2/mock"
@@ -32,7 +34,7 @@ import (
 func NewMockNotificationEndpointBackend(t *testing.T) *NotificationEndpointBackend {
 	return &NotificationEndpointBackend{
 		log:                         zaptest.NewLogger(t),
-		HTTPErrorHandler:            kithttp.ErrorHandler(0),
+		HTTPErrorHandler:            kithttp.NewErrorHandler(zaptest.NewLogger(t)),
 		NotificationEndpointService: &mock.NotificationEndpointService{},
 		UserResourceMappingService:  mock.NewUserResourceMappingService(),
 		LabelService:                mock.NewLabelService(),
@@ -244,7 +246,7 @@ func TestService_handleGetNotificationEndpoints(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleGetNotificationEndpoints() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -282,7 +284,7 @@ func TestService_handleGetNotificationEndpoint(t *testing.T) {
 			name: "get a notification endpoint by id",
 			fields: fields{
 				&mock.NotificationEndpointService{
-					FindNotificationEndpointByIDF: func(ctx context.Context, id influxdb.ID) (influxdb.NotificationEndpoint, error) {
+					FindNotificationEndpointByIDF: func(ctx context.Context, id platform.ID) (influxdb.NotificationEndpoint, error) {
 						if id == influxTesting.MustIDBase16("020f755c3c082000") {
 							return &endpoint.HTTP{
 								Base: endpoint.Base{
@@ -340,9 +342,9 @@ func TestService_handleGetNotificationEndpoint(t *testing.T) {
 			name: "not found",
 			fields: fields{
 				&mock.NotificationEndpointService{
-					FindNotificationEndpointByIDF: func(ctx context.Context, id influxdb.ID) (influxdb.NotificationEndpoint, error) {
-						return nil, &influxdb.Error{
-							Code: influxdb.ENotFound,
+					FindNotificationEndpointByIDF: func(ctx context.Context, id platform.ID) (influxdb.NotificationEndpoint, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "notification endpoint not found",
 						}
 					},
@@ -360,7 +362,7 @@ func TestService_handleGetNotificationEndpoint(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			notificationEndpointBackend := NewMockNotificationEndpointBackend(t)
-			notificationEndpointBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			notificationEndpointBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			notificationEndpointBackend.NotificationEndpointService = tt.fields.NotificationEndpointService
 			h := NewNotificationEndpointHandler(zaptest.NewLogger(t), notificationEndpointBackend)
 
@@ -382,7 +384,7 @@ func TestService_handleGetNotificationEndpoint(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 			t.Logf(res.Header.Get("X-Influx-Error"))
 
 			if res.StatusCode != tt.wants.statusCode {
@@ -429,7 +431,7 @@ func TestService_handlePostNotificationEndpoint(t *testing.T) {
 			fields: fields{
 				Secrets: map[string]string{},
 				NotificationEndpointService: &mock.NotificationEndpointService{
-					CreateNotificationEndpointF: func(ctx context.Context, edp influxdb.NotificationEndpoint, userID influxdb.ID) error {
+					CreateNotificationEndpointF: func(ctx context.Context, edp influxdb.NotificationEndpoint, userID platform.ID) error {
 						edp.SetID(influxTesting.MustIDBase16("020f755c3c082000"))
 						edp.BackfillSecretKeys()
 						return nil
@@ -536,7 +538,7 @@ func TestService_handleDeleteNotificationEndpoint(t *testing.T) {
 			name: "remove a notification endpoint by id",
 			fields: fields{
 				NotificationEndpointService: &mock.NotificationEndpointService{
-					DeleteNotificationEndpointF: func(ctx context.Context, id influxdb.ID) ([]influxdb.SecretField, influxdb.ID, error) {
+					DeleteNotificationEndpointF: func(ctx context.Context, id platform.ID) ([]influxdb.SecretField, platform.ID, error) {
 						if id == influxTesting.MustIDBase16("020f755c3c082000") {
 							return []influxdb.SecretField{
 								{Key: "k1"},
@@ -558,9 +560,9 @@ func TestService_handleDeleteNotificationEndpoint(t *testing.T) {
 			name: "notification endpoint not found",
 			fields: fields{
 				NotificationEndpointService: &mock.NotificationEndpointService{
-					DeleteNotificationEndpointF: func(ctx context.Context, id influxdb.ID) ([]influxdb.SecretField, influxdb.ID, error) {
-						return nil, 0, &influxdb.Error{
-							Code: influxdb.ENotFound,
+					DeleteNotificationEndpointF: func(ctx context.Context, id platform.ID) ([]influxdb.SecretField, platform.ID, error) {
+						return nil, 0, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "notification endpoint not found",
 						}
 					},
@@ -578,7 +580,7 @@ func TestService_handleDeleteNotificationEndpoint(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			notificationEndpointBackend := NewMockNotificationEndpointBackend(t)
-			notificationEndpointBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			notificationEndpointBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			notificationEndpointBackend.NotificationEndpointService = tt.fields.NotificationEndpointService
 
 			testttp.
@@ -622,7 +624,7 @@ func TestService_handlePatchNotificationEndpoint(t *testing.T) {
 			name: "update a notification endpoint name",
 			fields: fields{
 				&mock.NotificationEndpointService{
-					PatchNotificationEndpointF: func(ctx context.Context, id influxdb.ID, upd influxdb.NotificationEndpointUpdate) (influxdb.NotificationEndpoint, error) {
+					PatchNotificationEndpointF: func(ctx context.Context, id platform.ID, upd influxdb.NotificationEndpointUpdate) (influxdb.NotificationEndpoint, error) {
 						if id == influxTesting.MustIDBase16("020f755c3c082000") {
 							d := &endpoint.Slack{
 								Base: endpoint.Base{
@@ -678,9 +680,9 @@ func TestService_handlePatchNotificationEndpoint(t *testing.T) {
 			name: "notification endpoint not found",
 			fields: fields{
 				&mock.NotificationEndpointService{
-					PatchNotificationEndpointF: func(ctx context.Context, id influxdb.ID, upd influxdb.NotificationEndpointUpdate) (influxdb.NotificationEndpoint, error) {
-						return nil, &influxdb.Error{
-							Code: influxdb.ENotFound,
+					PatchNotificationEndpointF: func(ctx context.Context, id platform.ID, upd influxdb.NotificationEndpointUpdate) (influxdb.NotificationEndpoint, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "notification endpoint not found",
 						}
 					},
@@ -699,7 +701,7 @@ func TestService_handlePatchNotificationEndpoint(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			notificationEndpointBackend := NewMockNotificationEndpointBackend(t)
-			notificationEndpointBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			notificationEndpointBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			notificationEndpointBackend.NotificationEndpointService = tt.fields.NotificationEndpointService
 			h := NewNotificationEndpointHandler(zaptest.NewLogger(t), notificationEndpointBackend)
 
@@ -732,7 +734,7 @@ func TestService_handlePatchNotificationEndpoint(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePatchNotificationEndpoint() = %v, want %v %v", tt.name, res.StatusCode, tt.wants.statusCode, w.Header())
@@ -775,7 +777,7 @@ func TestService_handleUpdateNotificationEndpoint(t *testing.T) {
 			name: "update a notification endpoint name",
 			fields: fields{
 				NotificationEndpointService: &mock.NotificationEndpointService{
-					UpdateNotificationEndpointF: func(ctx context.Context, id influxdb.ID, edp influxdb.NotificationEndpoint, userID influxdb.ID) (influxdb.NotificationEndpoint, error) {
+					UpdateNotificationEndpointF: func(ctx context.Context, id platform.ID, edp influxdb.NotificationEndpoint, userID platform.ID) (influxdb.NotificationEndpoint, error) {
 						if id == influxTesting.MustIDBase16("020f755c3c082000") {
 							edp.SetID(id)
 							edp.BackfillSecretKeys()
@@ -826,9 +828,9 @@ func TestService_handleUpdateNotificationEndpoint(t *testing.T) {
 			name: "notification endpoint not found",
 			fields: fields{
 				NotificationEndpointService: &mock.NotificationEndpointService{
-					UpdateNotificationEndpointF: func(ctx context.Context, id influxdb.ID, edp influxdb.NotificationEndpoint, userID influxdb.ID) (influxdb.NotificationEndpoint, error) {
-						return nil, &influxdb.Error{
-							Code: influxdb.ENotFound,
+					UpdateNotificationEndpointF: func(ctx context.Context, id platform.ID, edp influxdb.NotificationEndpoint, userID platform.ID) (influxdb.NotificationEndpoint, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "notification endpoint not found",
 						}
 					},
@@ -850,7 +852,7 @@ func TestService_handleUpdateNotificationEndpoint(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			notificationEndpointBackend := NewMockNotificationEndpointBackend(t)
-			notificationEndpointBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			notificationEndpointBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			notificationEndpointBackend.NotificationEndpointService = tt.fields.NotificationEndpointService
 
 			resp := testttp.
@@ -898,7 +900,7 @@ func TestService_handlePostNotificationEndpointMember(t *testing.T) {
 			name: "add a notification endpoint member",
 			fields: fields{
 				UserService: &mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{
 							ID:     id,
 							Name:   "name",
@@ -952,7 +954,7 @@ func TestService_handlePostNotificationEndpointMember(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePostNotificationEndpointMember() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -993,7 +995,7 @@ func TestService_handlePostNotificationEndpointOwner(t *testing.T) {
 			name: "add a notification endpoint owner",
 			fields: fields{
 				UserService: &mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.User, error) {
 						return &influxdb.User{
 							ID:     id,
 							Name:   "name",
@@ -1046,7 +1048,7 @@ func TestService_handlePostNotificationEndpointOwner(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePostNotificationEndpointOwner() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -1065,7 +1067,7 @@ func TestService_handlePostNotificationEndpointOwner(t *testing.T) {
 
 func initNotificationEndpointService(f endpointTesting.NotificationEndpointFields, t *testing.T) (influxdb.NotificationEndpointService, influxdb.SecretService, func()) {
 	ctx := context.Background()
-	store := NewTestInmemStore(t)
+	store := influxTesting.NewTestInmemStore(t)
 	logger := zaptest.NewLogger(t)
 
 	tenantStore := tenant.NewStore(store)
@@ -1138,13 +1140,13 @@ func TestNotificationEndpointService(t *testing.T) {
 	}
 }
 
-func authCtxFn(userID influxdb.ID) func(context.Context) context.Context {
+func authCtxFn(userID platform.ID) func(context.Context) context.Context {
 	return func(ctx context.Context) context.Context {
 		return pcontext.SetAuthorizer(ctx, &influxdb.Session{UserID: userID})
 	}
 }
 
-func withOrgID(store *tenant.Store, orgID influxdb.ID, fn func()) {
+func withOrgID(store *tenant.Store, orgID platform.ID, fn func()) {
 	backup := store.OrgIDGen
 	defer func() { store.OrgIDGen = backup }()
 

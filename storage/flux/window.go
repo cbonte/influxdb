@@ -5,13 +5,13 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/apache/arrow/go/arrow/array"
-	"github.com/apache/arrow/go/arrow/memory"
+	"github.com/apache/arrow/go/v7/arrow/memory"
 	"github.com/influxdata/flux"
+	"github.com/influxdata/flux/array"
 	"github.com/influxdata/flux/arrow"
 	"github.com/influxdata/flux/execute"
 	"github.com/influxdata/flux/values"
-	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 )
 
 // splitWindows will split a windowTable by creating a new table from each
@@ -55,7 +55,7 @@ func (w *windowTableSplitter) Do(f func(flux.Table) error) error {
 
 		// Iterate through each time to produce a table
 		// using the start and stop values.
-		arrs := make([]array.Interface, len(cr.Cols()))
+		arrs := make([]array.Array, len(cr.Cols()))
 		for j := range cr.Cols() {
 			arrs[j] = getColumnValues(cr, j)
 		}
@@ -82,7 +82,7 @@ func (w *windowTableSplitter) Do(f func(flux.Table) error) error {
 			buffer := arrow.TableBuffer{
 				GroupKey: key,
 				Columns:  cr.Cols(),
-				Values:   make([]array.Interface, len(cr.Cols())),
+				Values:   make([]array.Array, len(cr.Cols())),
 			}
 			for j, arr := range arrs {
 				buffer.Values[j] = arrow.Slice(arr, int64(i), int64(i+1))
@@ -111,13 +111,13 @@ func (w *windowTableSplitter) Do(f func(flux.Table) error) error {
 func (w *windowTableSplitter) getTimeColumnIndex(label string) (int, error) {
 	j := execute.ColIdx(label, w.in.Cols())
 	if j < 0 {
-		return -1, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return -1, &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  fmt.Sprintf("missing %q column from window splitter", label),
 		}
 	} else if c := w.in.Cols()[j]; c.Type != flux.TTime {
-		return -1, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return -1, &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  fmt.Sprintf("%q column must be of type time", label),
 		}
 	}
@@ -140,8 +140,8 @@ func (w *windowTableRow) Cols() []flux.ColMeta {
 
 func (w *windowTableRow) Do(f func(flux.ColReader) error) error {
 	if !atomic.CompareAndSwapInt32(&w.used, 0, 1) {
-		return &influxdb.Error{
-			Code: influxdb.EInternal,
+		return &errors.Error{
+			Code: errors.EInternal,
 			Msg:  "table already read",
 		}
 	}
@@ -178,8 +178,8 @@ func groupKeyForWindow(key flux.GroupKey, start, stop int64) flux.GroupKey {
 	return execute.NewGroupKey(cols, vs)
 }
 
-// getColumnValues returns the array from the column reader as an array.Interface.
-func getColumnValues(cr flux.ColReader, j int) array.Interface {
+// getColumnValues returns the array from the column reader as an array.Array.
+func getColumnValues(cr flux.ColReader, j int) array.Array {
 	switch typ := cr.Cols()[j].Type; typ {
 	case flux.TInt:
 		return cr.Ints(j)

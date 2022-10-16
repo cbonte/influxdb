@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,6 +13,8 @@ import (
 	"github.com/go-chi/chi"
 	"github.com/google/go-cmp/cmp"
 	influxdb "github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/mock"
 	influxdbtesting "github.com/influxdata/influxdb/v2/testing"
 	"github.com/yudai/gojsondiff"
@@ -92,7 +94,7 @@ func TestService_handlePostLabel(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePostLabel() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -130,7 +132,7 @@ func TestService_handleGetLabel(t *testing.T) {
 			name: "get a label by id",
 			fields: fields{
 				&mock.LabelService{
-					FindLabelByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Label, error) {
+					FindLabelByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Label, error) {
 						if id == influxdbtesting.MustIDBase16("020f755c3c082000") {
 							return &influxdb.Label{
 								ID:   influxdbtesting.MustIDBase16("020f755c3c082000"),
@@ -171,9 +173,9 @@ func TestService_handleGetLabel(t *testing.T) {
 			name: "not found",
 			fields: fields{
 				&mock.LabelService{
-					FindLabelByIDFn: func(ctx context.Context, id influxdb.ID) (*influxdb.Label, error) {
-						return nil, &influxdb.Error{
-							Code: influxdb.ENotFound,
+					FindLabelByIDFn: func(ctx context.Context, id platform.ID) (*influxdb.Label, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  influxdb.ErrLabelNotFound,
 						}
 					},
@@ -205,7 +207,7 @@ func TestService_handleGetLabel(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleGetLabel() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -328,7 +330,7 @@ func TestService_handleGetLabels(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleGetLabels() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -367,7 +369,7 @@ func TestService_handlePatchLabel(t *testing.T) {
 			name: "update label properties",
 			fields: fields{
 				&mock.LabelService{
-					UpdateLabelFn: func(ctx context.Context, id influxdb.ID, upd influxdb.LabelUpdate) (*influxdb.Label, error) {
+					UpdateLabelFn: func(ctx context.Context, id platform.ID, upd influxdb.LabelUpdate) (*influxdb.Label, error) {
 						if id == influxdbtesting.MustIDBase16("020f755c3c082000") {
 							l := &influxdb.Label{
 								ID:   influxdbtesting.MustIDBase16("020f755c3c082000"),
@@ -421,9 +423,9 @@ func TestService_handlePatchLabel(t *testing.T) {
 			name: "label not found",
 			fields: fields{
 				&mock.LabelService{
-					UpdateLabelFn: func(ctx context.Context, id influxdb.ID, upd influxdb.LabelUpdate) (*influxdb.Label, error) {
-						return nil, &influxdb.Error{
-							Code: influxdb.ENotFound,
+					UpdateLabelFn: func(ctx context.Context, id platform.ID, upd influxdb.LabelUpdate) (*influxdb.Label, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  influxdb.ErrLabelNotFound,
 						}
 					},
@@ -468,7 +470,7 @@ func TestService_handlePatchLabel(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handlePatchLabel() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -510,7 +512,7 @@ func TestService_handleDeleteLabel(t *testing.T) {
 			name: "remove a label by id",
 			fields: fields{
 				&mock.LabelService{
-					DeleteLabelFn: func(ctx context.Context, id influxdb.ID) error {
+					DeleteLabelFn: func(ctx context.Context, id platform.ID) error {
 						if id == influxdbtesting.MustIDBase16("020f755c3c082000") {
 							return nil
 						}
@@ -530,9 +532,9 @@ func TestService_handleDeleteLabel(t *testing.T) {
 			name: "label not found",
 			fields: fields{
 				&mock.LabelService{
-					DeleteLabelFn: func(ctx context.Context, id influxdb.ID) error {
-						return &influxdb.Error{
-							Code: influxdb.ENotFound,
+					DeleteLabelFn: func(ctx context.Context, id platform.ID) error {
+						return &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  influxdb.ErrLabelNotFound,
 						}
 					},
@@ -564,7 +566,7 @@ func TestService_handleDeleteLabel(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleDeleteLabel() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)

@@ -9,9 +9,11 @@ import (
 
 	"github.com/golang/mock/gomock"
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"github.com/influxdata/influxdb/v2/mock"
 	itesting "github.com/influxdata/influxdb/v2/testing"
+	"go.uber.org/zap/zaptest"
 )
 
 const tokenScheme = "Token " // TODO(goller): I'd like this to be Bearer
@@ -104,7 +106,7 @@ func TestInflux1xAuthenticationHandler(t *testing.T) {
 			name: "token does not exist",
 			fields: fields{
 				AuthorizeFn: func(ctx context.Context, c influxdb.CredentialsV1) (*influxdb.Authorization, error) {
-					return nil, &influxdb.Error{Code: influxdb.EUnauthorized}
+					return nil, &errors.Error{Code: errors.EUnauthorized}
 				},
 			},
 			exp: exp{
@@ -115,7 +117,7 @@ func TestInflux1xAuthenticationHandler(t *testing.T) {
 			name: "authorize returns error EForbidden",
 			fields: fields{
 				AuthorizeFn: func(ctx context.Context, c influxdb.CredentialsV1) (*influxdb.Authorization, error) {
-					return nil, &influxdb.Error{Code: influxdb.EForbidden}
+					return nil, &errors.Error{Code: errors.EForbidden}
 				},
 			},
 			auth: basic(User, Token),
@@ -127,7 +129,7 @@ func TestInflux1xAuthenticationHandler(t *testing.T) {
 			name: "authorize returns error EUnauthorized",
 			fields: fields{
 				AuthorizeFn: func(ctx context.Context, c influxdb.CredentialsV1) (*influxdb.Authorization, error) {
-					return nil, &influxdb.Error{Code: influxdb.EUnauthorized}
+					return nil, &errors.Error{Code: errors.EUnauthorized}
 				},
 			},
 			auth: basic(User, Token),
@@ -139,7 +141,7 @@ func TestInflux1xAuthenticationHandler(t *testing.T) {
 			name: "authorize returns error other",
 			fields: fields{
 				AuthorizeFn: func(ctx context.Context, c influxdb.CredentialsV1) (*influxdb.Authorization, error) {
-					return nil, &influxdb.Error{Code: influxdb.EInvalid}
+					return nil, &errors.Error{Code: errors.EInvalid}
 				},
 			},
 			auth: basic(User, Token),
@@ -173,7 +175,7 @@ func TestInflux1xAuthenticationHandler(t *testing.T) {
 					w.WriteHeader(http.StatusOK)
 				})
 
-				h = NewInflux1xAuthenticationHandler(next, auth, kithttp.ErrorHandler(0))
+				h = NewInflux1xAuthenticationHandler(next, auth, kithttp.NewErrorHandler(zaptest.NewLogger(t)))
 			}
 
 			w := httptest.NewRecorder()

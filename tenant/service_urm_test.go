@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kv"
 	"github.com/influxdata/influxdb/v2/mock"
 	"github.com/influxdata/influxdb/v2/tenant"
@@ -16,11 +17,7 @@ func TestBoltUserResourceMappingService(t *testing.T) {
 }
 
 func initBoltUserResourceMappingService(f influxdbtesting.UserResourceFields, t *testing.T) (influxdb.UserResourceMappingService, func()) {
-	s, closeBolt, err := NewTestBoltStore(t)
-	if err != nil {
-		t.Fatalf("failed to create new kv store: %v", err)
-	}
-
+	s, closeBolt := influxdbtesting.NewTestBoltStore(t)
 	svc, closeSvc := initUserResourceMappingService(s, f, t)
 	return svc, func() {
 		closeSvc()
@@ -42,7 +39,7 @@ func initUserResourceMappingService(s kv.Store, f influxdbtesting.UserResourceFi
 		}
 	}
 
-	withID := func(gen *influxdb.IDGenerator, id influxdb.ID, fn func()) {
+	withID := func(gen *platform.IDGenerator, id platform.ID, fn func()) {
 		idGen := *gen
 		defer func() { *gen = idGen }()
 

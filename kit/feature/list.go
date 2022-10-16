@@ -16,48 +16,6 @@ func AppMetrics() BoolFlag {
 	return appMetrics
 }
 
-var backendExample = MakeBoolFlag(
-	"Backend Example",
-	"backendExample",
-	"Gavin Cabbage",
-	false,
-	Permanent,
-	false,
-)
-
-// BackendExample - A permanent backend example boolean flag
-func BackendExample() BoolFlag {
-	return backendExample
-}
-
-var communityTemplates = MakeBoolFlag(
-	"Community Templates",
-	"communityTemplates",
-	"Bucky",
-	true,
-	Permanent,
-	true,
-)
-
-// CommunityTemplates - Replace current template uploading functionality with community driven templates
-func CommunityTemplates() BoolFlag {
-	return communityTemplates
-}
-
-var frontendExample = MakeIntFlag(
-	"Frontend Example",
-	"frontendExample",
-	"Gavin Cabbage",
-	42,
-	Temporary,
-	true,
-)
-
-// FrontendExample - A temporary frontend example integer flag
-func FrontendExample() IntFlag {
-	return frontendExample
-}
-
 var groupWindowAggregateTranspose = MakeBoolFlag(
 	"Group Window Aggregate Transpose",
 	"groupWindowAggregateTranspose",
@@ -128,62 +86,6 @@ func QueryTracing() BoolFlag {
 	return queryTracing
 }
 
-var simpleTaskOptionsExtraction = MakeBoolFlag(
-	"Simple Task Options Extraction",
-	"simpleTaskOptionsExtraction",
-	"Brett Buddin",
-	false,
-	Temporary,
-	false,
-)
-
-// SimpleTaskOptionsExtraction - Simplified task options extraction to avoid undefined functions when saving tasks
-func SimpleTaskOptionsExtraction() BoolFlag {
-	return simpleTaskOptionsExtraction
-}
-
-var bandPlotType = MakeBoolFlag(
-	"Band Plot Type",
-	"bandPlotType",
-	"Monitoring Team",
-	false,
-	Temporary,
-	true,
-)
-
-// BandPlotType - Enables the creation of a band plot in Dashboards
-func BandPlotType() BoolFlag {
-	return bandPlotType
-}
-
-var mosaicGraphType = MakeBoolFlag(
-	"Mosaic Graph Type",
-	"mosaicGraphType",
-	"Monitoring Team",
-	false,
-	Temporary,
-	true,
-)
-
-// MosaicGraphType - Enables the creation of a mosaic graph in Dashboards
-func MosaicGraphType() BoolFlag {
-	return mosaicGraphType
-}
-
-var notebooks = MakeBoolFlag(
-	"Notebooks",
-	"notebooks",
-	"Monitoring Team",
-	false,
-	Temporary,
-	true,
-)
-
-// Notebooks - Determine if the notebook feature's route and navbar icon are visible to the user
-func Notebooks() BoolFlag {
-	return notebooks
-}
-
 var injectLatestSuccessTime = MakeBoolFlag(
 	"Inject Latest Success Time",
 	"injectLatestSuccessTime",
@@ -226,40 +128,74 @@ func TimeFilterFlags() BoolFlag {
 	return timeFilterFlags
 }
 
+var cursorAtEOF = MakeBoolFlag(
+	"Default Monaco Selection to EOF",
+	"cursorAtEOF",
+	"Monitoring Team",
+	false,
+	Temporary,
+	true,
+)
+
+// DefaultMonacoSelectionToEof - Positions the cursor at the end of the line(s) when using the monaco editor
+func DefaultMonacoSelectionToEof() BoolFlag {
+	return cursorAtEOF
+}
+
+var refreshSingleCell = MakeBoolFlag(
+	"Refresh Single Cell",
+	"refreshSingleCell",
+	"Monitoring Team",
+	true,
+	Temporary,
+	true,
+)
+
+// RefreshSingleCell - Refresh a single cell on the dashboard rather than the entire dashboard
+func RefreshSingleCell() BoolFlag {
+	return refreshSingleCell
+}
+
+var newAutoRefresh = MakeBoolFlag(
+	"New Dashboard Autorefresh",
+	"newAutoRefresh",
+	"Monitoring Team",
+	true,
+	Temporary,
+	true,
+)
+
+// NewDashboardAutorefresh - Enables the new dashboard autorefresh controls in the UI
+func NewDashboardAutorefresh() BoolFlag {
+	return newAutoRefresh
+}
+
 var all = []Flag{
 	appMetrics,
-	backendExample,
-	communityTemplates,
-	frontendExample,
 	groupWindowAggregateTranspose,
 	newLabels,
 	memoryOptimizedFill,
 	memoryOptimizedSchemaMutation,
 	queryTracing,
-	simpleTaskOptionsExtraction,
-	bandPlotType,
-	mosaicGraphType,
-	notebooks,
 	injectLatestSuccessTime,
 	enforceOrgDashboardLimits,
 	timeFilterFlags,
+	cursorAtEOF,
+	refreshSingleCell,
+	newAutoRefresh,
 }
 
 var byKey = map[string]Flag{
 	"appMetrics":                    appMetrics,
-	"backendExample":                backendExample,
-	"communityTemplates":            communityTemplates,
-	"frontendExample":               frontendExample,
 	"groupWindowAggregateTranspose": groupWindowAggregateTranspose,
 	"newLabels":                     newLabels,
 	"memoryOptimizedFill":           memoryOptimizedFill,
 	"memoryOptimizedSchemaMutation": memoryOptimizedSchemaMutation,
 	"queryTracing":                  queryTracing,
-	"simpleTaskOptionsExtraction":   simpleTaskOptionsExtraction,
-	"bandPlotType":                  bandPlotType,
-	"mosaicGraphType":               mosaicGraphType,
-	"notebooks":                     notebooks,
 	"injectLatestSuccessTime":       injectLatestSuccessTime,
 	"enforceOrgDashboardLimits":     enforceOrgDashboardLimits,
 	"timeFilterFlags":               timeFilterFlags,
+	"cursorAtEOF":                   cursorAtEOF,
+	"refreshSingleCell":             refreshSingleCell,
+	"newAutoRefresh":                newAutoRefresh,
 }

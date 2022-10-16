@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/influxdata/influxdb/v2"
 	iql "github.com/influxdata/influxdb/v2/influxql"
 	"github.com/influxdata/influxdb/v2/influxql/control"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kit/tracing"
 	"github.com/influxdata/influxdb/v2/models"
 	"github.com/influxdata/influxql"
@@ -103,7 +103,7 @@ func AuthorizerIsOpen(a Authorizer) bool {
 // ExecutionOptions contains the options for executing a query.
 type ExecutionOptions struct {
 	// OrgID is the organization for which this query is being executed.
-	OrgID influxdb.ID
+	OrgID platform.ID
 
 	// The database the query is running against.
 	Database string
@@ -350,8 +350,7 @@ func (e *Executor) recover(query *influxql.Query, results chan *Result) {
 
 		if willCrash {
 			e.log.Error("\n\n=====\nAll goroutines now follow:")
-			buf := debug.Stack()
-			e.log.Error(fmt.Sprintf("%s", buf))
+			e.log.Error(string(debug.Stack()))
 			os.Exit(1)
 		}
 	}

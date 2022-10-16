@@ -11,12 +11,16 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/influxdata/flux/ast"
-	influxdb "github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/mock"
 	"github.com/influxdata/influxdb/v2/notification"
 	"github.com/influxdata/influxdb/v2/notification/endpoint"
 	"github.com/influxdata/influxdb/v2/notification/rule"
 	"github.com/influxdata/influxdb/v2/pkg/pointer"
+	"github.com/influxdata/influxdb/v2/task/taskmodel"
+	itesting "github.com/influxdata/influxdb/v2/testing"
 )
 
 const (
@@ -38,11 +42,11 @@ var (
 
 // NotificationRuleFields includes prepopulated data for mapping tests.
 type NotificationRuleFields struct {
-	IDGenerator       influxdb.IDGenerator
+	IDGenerator       platform.IDGenerator
 	TimeGenerator     influxdb.TimeGenerator
 	NotificationRules []influxdb.NotificationRule
 	Orgs              []*influxdb.Organization
-	Tasks             []influxdb.TaskCreate
+	Tasks             []taskmodel.TaskCreate
 	Endpoints         []influxdb.NotificationEndpoint
 }
 
@@ -63,14 +67,14 @@ var taskCmpOptions = cmp.Options{
 	}),
 	// skip comparing permissions
 	cmpopts.IgnoreFields(
-		influxdb.Task{},
+		taskmodel.Task{},
 		"LatestCompleted",
 		"LatestScheduled",
 		"CreatedAt",
 		"UpdatedAt",
 	),
-	cmp.Transformer("Sort", func(in []*influxdb.Task) []*influxdb.Task {
-		out := append([]*influxdb.Task{}, in...) // Copy input to avoid mutating it
+	cmp.Transformer("Sort", func(in []*taskmodel.Task) []*taskmodel.Task {
+		out := append([]*taskmodel.Task{}, in...) // Copy input to avoid mutating it
 		sort.Slice(out, func(i, j int) bool {
 			return out[i].ID > out[j].ID
 		})
@@ -78,7 +82,7 @@ var taskCmpOptions = cmp.Options{
 	}),
 }
 
-type notificationRuleFactory func(NotificationRuleFields, *testing.T) (influxdb.NotificationRuleStore, influxdb.TaskService, func())
+type notificationRuleFactory func(NotificationRuleFields, *testing.T) (influxdb.NotificationRuleStore, taskmodel.TaskService, func())
 
 // NotificationRuleStore tests all the service functions.
 func NotificationRuleStore(
@@ -127,12 +131,12 @@ func CreateNotificationRule(
 ) {
 	type args struct {
 		notificationRule influxdb.NotificationRule
-		userID           influxdb.ID
+		userID           platform.ID
 	}
 	type wants struct {
 		err              error
 		notificationRule influxdb.NotificationRule
-		task             *influxdb.Task
+		task             *taskmodel.Task
 	}
 
 	tests := []struct {
@@ -284,7 +288,7 @@ func CreateNotificationRule(
 					},
 					MessageTemplate: "msg1",
 				},
-				task: &influxdb.Task{
+				task: &taskmodel.Task{
 					ID:             MustIDBase16("020f755c3c082001"),
 					Type:           "slack",
 					OrganizationID: MustIDBase16("020f755c3c082003"),
@@ -292,8 +296,46 @@ func CreateNotificationRule(
 					OwnerID:        MustIDBase16("020f755c3c082005"),
 					Name:           "name2",
 					Status:         "active",
-					Flux:           "package main\n// name2\nimport \"influxdata/influxdb/monitor\"\nimport \"slack\"\nimport \"influxdata/influxdb/secrets\"\nimport \"experimental\"\n\noption task = {name: \"name2\", every: 1h}\n\nslack_secret = secrets[\"get\"](key: \"020f755c3c082001-token\")\nslack_endpoint = slack[\"endpoint\"](token: slack_secret, url: \"http://localhost:7777\")\nnotification = {\n\t_notification_rule_id: \"020f755c3c082001\",\n\t_notification_rule_name: \"name2\",\n\t_notification_endpoint_id: \"020f755c3c082001\",\n\t_notification_endpoint_name: \"foo\",\n}\nstatuses = monitor[\"from\"](start: -2h, fn: (r) =>\n\t(r[\"k1\"] == \"v1\" and r[\"k2\"] == \"v2\"))\ncrit = statuses\n\t|> filter(fn: (r) =>\n\t\t(r[\"_level\"] == \"crit\"))\nall_statuses = crit\n\t|> filter(fn: (r) =>\n\t\t(r[\"_time\"] >= experimental[\"subDuration\"](from: now(), d: 1h)))\n\nall_statuses\n\t|> monitor[\"notify\"](data: notification, endpoint: slack_endpoint(mapFn: (r) =>\n\t\t({channel: \"\", text: \"msg1\", color: if r[\"_level\"] == \"crit\" then \"danger\" else if r[\"_level\"] == \"warn\" then \"warning\" else \"good\"})))",
-					Every:          "1h",
+					Flux: itesting.FormatFluxString(t, `import "influxdata/influxdb/monitor"
+import "slack"
+import "influxdata/influxdb/secrets"
+import "experimental"
+
+option task = {name: "name2", every: 1h}
+
+slack_secret = secrets["get"](key: "020f755c3c082001-token")
+slack_endpoint = slack["endpoint"](token: slack_secret, url: "http://localhost:7777")
+notification = {
+    _notification_rule_id: "020f755c3c082001",
+    _notification_rule_name: "name2",
+    _notification_endpoint_id: "020f755c3c082001",
+    _notification_endpoint_name: "foo",
+}
+statuses = monitor["from"](start: -2h, fn: (r) => r["k1"] == "v1" and r["k2"] == "v2")
+crit = statuses |> filter(fn: (r) => r["_level"] == "crit")
+all_statuses = crit |> filter(fn: (r) => r["_time"] >= experimental["subDuration"](from: now(), d: 1h))
+
+all_statuses
+    |> monitor["notify"](
+        data: notification,
+        endpoint:
+            slack_endpoint(
+                mapFn: (r) =>
+                    ({
+                        channel: "",
+                        text: "msg1",
+                        color:
+                            if r["_level"] == "crit" then
+                                "danger"
+                            else if r["_level"] == "warn" then
+                                "warning"
+                            else
+                                "good",
+                    }),
+            ),
+    )
+`),
+					Every: "1h",
 				},
 			},
 		},
@@ -403,8 +445,8 @@ func CreateNotificationRule(
 				},
 			},
 			wants: wants{
-				err: &influxdb.Error{
-					Code: influxdb.EInvalid,
+				err: &errors.Error{
+					Code: errors.EInvalid,
 					Msg:  "tag must contain a key and a value",
 				},
 			},
@@ -450,7 +492,7 @@ func CreateNotificationRule(
 			if tt.wants.task == nil || !tt.wants.task.ID.Valid() {
 				// if not tasks or a task with an invalid ID is provided (0) then assume
 				// no tasks should be persisted
-				_, n, err := tasks.FindTasks(ctx, influxdb.TaskFilter{})
+				_, n, err := tasks.FindTasks(ctx, taskmodel.TaskFilter{})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -480,7 +522,7 @@ func FindNotificationRuleByID(
 	t *testing.T,
 ) {
 	type args struct {
-		id influxdb.ID
+		id platform.ID
 	}
 	type wants struct {
 		err              error
@@ -535,11 +577,11 @@ func FindNotificationRuleByID(
 				},
 			},
 			args: args{
-				id: influxdb.ID(0),
+				id: platform.ID(0),
 			},
 			wants: wants{
-				err: &influxdb.Error{
-					Code: influxdb.EInvalid,
+				err: &errors.Error{
+					Code: errors.EInvalid,
 					Msg:  "provided notification rule ID has invalid format",
 				},
 			},
@@ -589,8 +631,8 @@ func FindNotificationRuleByID(
 				id: MustIDBase16(threeID),
 			},
 			wants: wants{
-				err: &influxdb.Error{
-					Code: influxdb.ENotFound,
+				err: &errors.Error{
+					Code: errors.ENotFound,
 					Msg:  "notification rule not found",
 				},
 			},
@@ -1234,8 +1276,8 @@ func UpdateNotificationRule(
 	t *testing.T,
 ) {
 	type args struct {
-		userID           influxdb.ID
-		id               influxdb.ID
+		userID           platform.ID
+		id               platform.ID
 		notificationRule influxdb.NotificationRule
 	}
 
@@ -1309,8 +1351,8 @@ func UpdateNotificationRule(
 				},
 			},
 			wants: wants{
-				err: &influxdb.Error{
-					Code: influxdb.ENotFound,
+				err: &errors.Error{
+					Code: errors.ENotFound,
 					Msg:  "notification rule not found",
 				},
 			},
@@ -1320,7 +1362,7 @@ func UpdateNotificationRule(
 			fields: NotificationRuleFields{
 				TimeGenerator: fakeGenerator,
 				IDGenerator:   mock.NewIDGenerator(twoID, t),
-				Tasks: []influxdb.TaskCreate{
+				Tasks: []taskmodel.TaskCreate{
 					{
 						OwnerID:        MustIDBase16(sixID),
 						OrganizationID: MustIDBase16(fourID),
@@ -1480,7 +1522,7 @@ func PatchNotificationRule(
 
 	type args struct {
 		//userID           influxdb.ID
-		id  influxdb.ID
+		id  platform.ID
 		upd influxdb.NotificationRuleUpdate
 	}
 
@@ -1544,8 +1586,8 @@ func PatchNotificationRule(
 				},
 			},
 			wants: wants{
-				err: &influxdb.Error{
-					Code: influxdb.ENotFound,
+				err: &errors.Error{
+					Code: errors.ENotFound,
 					Msg:  "notification rule not found",
 				},
 			},
@@ -1555,7 +1597,7 @@ func PatchNotificationRule(
 			fields: NotificationRuleFields{
 				TimeGenerator: fakeGenerator,
 				IDGenerator:   mock.NewIDGenerator(twoID, t),
-				Tasks: []influxdb.TaskCreate{
+				Tasks: []taskmodel.TaskCreate{
 					{
 						OwnerID:        MustIDBase16(sixID),
 						OrganizationID: MustIDBase16(fourID),
@@ -1680,7 +1722,7 @@ func PatchNotificationRule(
 			fields: NotificationRuleFields{
 				TimeGenerator: fakeGenerator,
 				IDGenerator:   mock.NewIDGenerator(twoID, t),
-				Tasks: []influxdb.TaskCreate{
+				Tasks: []taskmodel.TaskCreate{
 					{
 						OwnerID:        MustIDBase16(sixID),
 						OrganizationID: MustIDBase16(fourID),
@@ -1823,8 +1865,8 @@ func DeleteNotificationRule(
 	t *testing.T,
 ) {
 	type args struct {
-		id    influxdb.ID
-		orgID influxdb.ID
+		id    platform.ID
+		orgID platform.ID
 	}
 
 	type wants struct {
@@ -1879,12 +1921,12 @@ func DeleteNotificationRule(
 				},
 			},
 			args: args{
-				id:    influxdb.ID(0),
+				id:    platform.ID(0),
 				orgID: MustIDBase16(fourID),
 			},
 			wants: wants{
-				err: &influxdb.Error{
-					Code: influxdb.EInvalid,
+				err: &errors.Error{
+					Code: errors.EInvalid,
 					Msg:  "provided notification rule ID has invalid format",
 				},
 				notificationRules: []influxdb.NotificationRule{
@@ -1930,7 +1972,7 @@ func DeleteNotificationRule(
 			name: "none existing config",
 			fields: NotificationRuleFields{
 				IDGenerator: mock.NewIDGenerator(twoID, t),
-				Tasks: []influxdb.TaskCreate{
+				Tasks: []taskmodel.TaskCreate{
 					{
 						OwnerID:        MustIDBase16(sixID),
 						OrganizationID: MustIDBase16(fourID),
@@ -1989,8 +2031,8 @@ func DeleteNotificationRule(
 				orgID: MustIDBase16(fourID),
 			},
 			wants: wants{
-				err: &influxdb.Error{
-					Code: influxdb.ENotFound,
+				err: &errors.Error{
+					Code: errors.ENotFound,
 					Msg:  "notification rule not found",
 				},
 				notificationRules: []influxdb.NotificationRule{
@@ -2035,7 +2077,7 @@ func DeleteNotificationRule(
 		{
 			name: "regular delete",
 			fields: NotificationRuleFields{
-				Tasks: []influxdb.TaskCreate{
+				Tasks: []taskmodel.TaskCreate{
 					{
 						OwnerID:        MustIDBase16(sixID),
 						OrganizationID: MustIDBase16(fourID),
@@ -2153,8 +2195,8 @@ func DeleteNotificationRule(
 }
 
 // MustIDBase16 is an helper to ensure a correct ID is built during testing.
-func MustIDBase16(s string) influxdb.ID {
-	id, err := influxdb.IDFromString(s)
+func MustIDBase16(s string) platform.ID {
+	id, err := platform.IDFromString(s)
 	if err != nil {
 		panic(err)
 	}
@@ -2162,7 +2204,7 @@ func MustIDBase16(s string) influxdb.ID {
 }
 
 // MustIDBase16Ptr is an helper to ensure a correct *ID is built during testing.
-func MustIDBase16Ptr(s string) *influxdb.ID {
+func MustIDBase16Ptr(s string) *platform.ID {
 	id := MustIDBase16(s)
 	return &id
 }
@@ -2182,18 +2224,18 @@ func ErrorsEqual(t *testing.T, actual, expected error) {
 		t.Errorf("expected error %s but received nil", expected.Error())
 	}
 
-	if influxdb.ErrorCode(expected) != influxdb.ErrorCode(actual) {
+	if errors.ErrorCode(expected) != errors.ErrorCode(actual) {
 		t.Logf("\nexpected: %v\nactual: %v\n\n", expected, actual)
-		t.Errorf("expected error code %q but received %q", influxdb.ErrorCode(expected), influxdb.ErrorCode(actual))
+		t.Errorf("expected error code %q but received %q", errors.ErrorCode(expected), errors.ErrorCode(actual))
 	}
 
-	if influxdb.ErrorMessage(expected) != influxdb.ErrorMessage(actual) {
+	if errors.ErrorMessage(expected) != errors.ErrorMessage(actual) {
 		t.Logf("\nexpected: %v\nactual: %v\n\n", expected, actual)
-		t.Errorf("expected error message %q but received %q", influxdb.ErrorMessage(expected), influxdb.ErrorMessage(actual))
+		t.Errorf("expected error message %q but received %q", errors.ErrorMessage(expected), errors.ErrorMessage(actual))
 	}
 }
 
-func idPtr(id influxdb.ID) *influxdb.ID {
+func idPtr(id platform.ID) *platform.ID {
 	return &id
 }
 

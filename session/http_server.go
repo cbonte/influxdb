@@ -7,6 +7,7 @@ import (
 	"github.com/go-chi/chi"
 	"github.com/go-chi/chi/middleware"
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"go.uber.org/zap"
 )
@@ -113,11 +114,11 @@ type signinRequest struct {
 	Password string
 }
 
-func decodeSigninRequest(ctx context.Context, r *http.Request) (*signinRequest, *influxdb.Error) {
+func decodeSigninRequest(ctx context.Context, r *http.Request) (*signinRequest, *errors.Error) {
 	u, p, ok := r.BasicAuth()
 	if !ok {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "invalid basic auth",
 		}
 	}
@@ -151,7 +152,7 @@ type signoutRequest struct {
 }
 
 func decodeSignoutRequest(ctx context.Context, r *http.Request) (*signoutRequest, error) {
-	key, err := decodeCookieSession(ctx, r)
+	key, err := DecodeCookieSession(ctx, r)
 	if err != nil {
 		return nil, err
 	}
@@ -160,22 +161,63 @@ func decodeSignoutRequest(ctx context.Context, r *http.Request) (*signoutRequest
 	}, nil
 }
 
-const cookieSessionName = "session"
+const cookieSessionName = "influxdb-oss-session"
 
 func encodeCookieSession(w http.ResponseWriter, s *influxdb.Session) {
+	// We only need the session cookie for accesses to "/api/...", so limit
+	// it to that using "Path".
+	//
+	// Since the cookie is limited to "/api/..." and we don't expect any
+	// links directly into /api/..., use SameSite=Strict as a hardening
+	// measure. This works because external links into the UI have the form
+	// https://<url>/orgs/<origid>/..., https://<url>/signin, etc and don't
+	// need the cookie sent. By the time the UI itself calls out to
+	// /api/..., the location bar matches the cookie's domain and
+	// everything is 1st party and Strict's restriction work fine.
+	//
+	// SameSite=Lax would also be safe to use (modern browser's default if
+	// unset) since it only sends the cookie with GET (and other safe HTTP
+	// methods like HEAD and OPTIONS as defined in RFC6264) requests when
+	// the location bar matches the domain of the cookie and we know that
+	// our APIs do not perform state-changing actions with GET and other
+	// safe methods. Using SameSite=Strict helps future-proof us against
+	// that changing (ie, we add a state-changing GET API).
+	//
+	// Note: it's generally recommended that SameSite should not be relied
+	// upon (particularly Lax) because:
+	// a) SameSite doesn't work with (cookie-less) Basic Auth. We don't
+	//    share browser session BasicAuth with accesses to to /api/... so
+	//    this isn't a problem
+	// b) SameSite=lax allows GET (and other safe HTTP methods) and some
+	//    services might allow state-changing requests via GET. Our API
+	//    doesn't support state-changing GETs and SameSite=strict doesn't
+	//    allow GETs from 3rd party sites at all, so this isn't a problem
+	// c) similar to 'b', some frameworks will accept HTTP methods for
+	//    other handlers. Eg, the application is designed for POST but it
+	//    will accept requests converted to the GET method. Golang does not
+	//    do this itself and our route mounts explicitly map the HTTP
+	//    method to the specific handler and thus we are not susceptible to
+	//    this
+	// d) SameSite could be bypassed if the attacker were able to
+	//    manipulate the location bar in the browser (a serious browser
+	//    bug; it is reasonable for us to expect browsers to enforce their
+	//    SameSite restrictions)
 	c := &http.Cookie{
-		Name:  cookieSessionName,
-		Value: s.Key,
+		Name:     cookieSessionName,
+		Value:    s.Key,
+		Path:     "/api/", // since UI doesn't need it, limit cookie usage to API requests
+		Expires:  s.ExpiresAt,
+		SameSite: http.SameSiteStrictMode,
 	}
 
 	http.SetCookie(w, c)
 }
 
-func decodeCookieSession(ctx context.Context, r *http.Request) (string, error) {
+func DecodeCookieSession(ctx context.Context, r *http.Request) (string, error) {
 	c, err := r.Cookie(cookieSessionName)
 	if err != nil {
-		return "", &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return "", &errors.Error{
+			Code: errors.EInvalid,
 			Err:  err,
 		}
 	}
@@ -185,9 +227,10 @@ func decodeCookieSession(ctx context.Context, r *http.Request) (string, error) {
 // SetCookieSession adds a cookie for the session to an http request
 func SetCookieSession(key string, r *http.Request) {
 	c := &http.Cookie{
-		Name:   cookieSessionName,
-		Value:  key,
-		Secure: true,
+		Name:     cookieSessionName,
+		Value:    key,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
 	}
 
 	r.AddCookie(c)

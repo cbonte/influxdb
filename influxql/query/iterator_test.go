@@ -825,6 +825,61 @@ func TestFillIterator_ImplicitStartTime(t *testing.T) {
 	}
 }
 
+// A count() GROUP BY query with an offset that caused an interval
+// to cross a daylight savings change inserted an extra output row
+// off by one hour in a grouped count() expression.
+// https://github.com/influxdata/influxdb/issues/20238
+
+func TestGroupByIterator_DST(t *testing.T) {
+	inputIter := &IntegerIterator{
+		Points: []query.IntegerPoint{
+			{Name: "a", Tags: ParseTags("t=A"), Time: 1584345600000000000, Value: 1},
+			{Name: "a", Tags: ParseTags("t=A"), Time: 1584432000000000000, Value: 2},
+			{Name: "a", Tags: ParseTags("t=A"), Time: 1584518400000000000, Value: 3},
+			{Name: "a", Tags: ParseTags("t=A"), Time: 1585555200000000000, Value: 4},
+		},
+	}
+	const location = "Europe/Rome"
+	loc, err := time.LoadLocation(location)
+	if err != nil {
+		t.Fatalf("Cannot find timezone for %s: %s", location, err)
+	}
+	opt := query.IteratorOptions{
+		StartTime: mustParseTime("2020-03-15T00:00:00Z").UnixNano(),
+		EndTime:   mustParseTime("2020-04-01T00:00:00Z").UnixNano(),
+		Ascending: true,
+		Ordered:   true,
+		StripName: false,
+		Fill:      influxql.NullFill,
+		FillValue: nil,
+		Dedupe:    false,
+		Interval: query.Interval{
+			Duration: 7 * 24 * time.Hour,
+			Offset:   4 * 24 * time.Hour,
+		},
+		Expr:     MustParseExpr("count(Value)"),
+		Location: loc,
+	}
+
+	groupByIter, err := query.NewCallIterator(inputIter, opt)
+	if err != nil {
+		t.Fatalf("Cannot create Count and Group By iterator: %s", err)
+	} else {
+		groupByIter = query.NewFillIterator(groupByIter, MustParseExpr("count(Value)"), opt)
+	}
+
+	if a, err := (Iterators{groupByIter}).ReadAll(); err != nil {
+		t.Fatalf("unexpected error: %s", err)
+	} else if !deep.Equal(a, [][]query.Point{
+		{&query.IntegerPoint{Name: "a", Aggregated: 0, Time: mustParseTime("2020-03-09T00:00:00+01:00").UnixNano(), Value: 0}},
+		{&query.IntegerPoint{Name: "a", Aggregated: 3, Time: mustParseTime("2020-03-16T00:00:00+01:00").UnixNano(), Value: 3}},
+		{&query.IntegerPoint{Name: "a", Aggregated: 0, Time: mustParseTime("2020-03-23T00:00:00+01:00").UnixNano(), Value: 0}},
+		{&query.IntegerPoint{Name: "a", Aggregated: 1, Time: mustParseTime("2020-03-30T00:00:00+02:00").UnixNano(), Value: 1}},
+	}) {
+		t.Fatalf("unexpected points: %s", spew.Sdump(a))
+	}
+}
+
 func TestFillIterator_DST(t *testing.T) {
 	for _, tt := range []struct {
 		name       string
@@ -1511,6 +1566,64 @@ func TestIterator_EncodeDecode(t *testing.T) {
 	} else if p != nil {
 		t.Fatalf("unexpected point(eof); %#v", p)
 	}
+}
+
+// Test implementation of query.IntegerIterator
+type IntegerConstIterator struct {
+	numPoints int
+	Closed    bool
+	stats     query.IteratorStats
+	point     query.IntegerPoint
+}
+
+func BenchmarkIterator_Aggregator(b *testing.B) {
+	input := &IntegerConstIterator{
+		numPoints: b.N,
+		Closed:    false,
+		stats:     query.IteratorStats{},
+		point: query.IntegerPoint{
+			Name:  "constPoint",
+			Value: 1,
+		},
+	}
+	opt := query.IteratorOptions{
+		Interval: query.Interval{
+			Duration: 100 * time.Minute,
+		},
+		Expr: &influxql.Call{
+			Name: "count",
+		},
+	}
+
+	counter, err := query.NewCallIterator(input, opt)
+	if err != nil {
+		b.Fatalf("Bad counter: %v", err)
+	}
+
+	b.ResetTimer()
+	point, err := counter.(query.IntegerIterator).Next()
+	if err != nil {
+		b.Fatalf("Unexpected error %v", err)
+	}
+	if point == nil {
+		b.Fatal("Expected point not to be nil")
+	}
+	if point.Value != int64(b.N) {
+		b.Fatalf("Expected %v != %v points", b.N, point.Value)
+	}
+}
+
+func (itr *IntegerConstIterator) Stats() query.IteratorStats { return itr.stats }
+func (itr *IntegerConstIterator) Close() error               { itr.Closed = true; return nil }
+
+// Next returns the next value and shifts it off the beginning of the points slice.
+func (itr *IntegerConstIterator) Next() (*query.IntegerPoint, error) {
+	if itr.numPoints == 0 || itr.Closed {
+		return nil, nil
+	}
+	itr.numPoints--
+	itr.point.Time++
+	return &itr.point, nil
 }
 
 // Test implementation of influxql.FloatIterator

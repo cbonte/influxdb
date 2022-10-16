@@ -11,13 +11,15 @@ import (
 	platform "github.com/influxdata/influxdb/v2"
 	platcontext "github.com/influxdata/influxdb/v2/context"
 	"github.com/influxdata/influxdb/v2/jsonweb"
+	errors2 "github.com/influxdata/influxdb/v2/kit/platform/errors"
+	"github.com/influxdata/influxdb/v2/session"
 	"github.com/opentracing/opentracing-go"
 	"go.uber.org/zap"
 )
 
 // AuthenticationHandler is a middleware for authenticating incoming requests.
 type AuthenticationHandler struct {
-	platform.HTTPErrorHandler
+	errors2.HTTPErrorHandler
 	log *zap.Logger
 
 	AuthorizationService platform.AuthorizationService
@@ -34,11 +36,11 @@ type AuthenticationHandler struct {
 }
 
 // NewAuthenticationHandler creates an authentication handler.
-func NewAuthenticationHandler(log *zap.Logger, h platform.HTTPErrorHandler) *AuthenticationHandler {
+func NewAuthenticationHandler(log *zap.Logger, h errors2.HTTPErrorHandler) *AuthenticationHandler {
 	return &AuthenticationHandler{
 		log:              log,
 		HTTPErrorHandler: h,
-		Handler:          http.DefaultServeMux,
+		Handler:          http.NotFoundHandler(),
 		TokenParser:      jsonweb.NewTokenParser(jsonweb.EmptyKeyStore),
 		noAuthRouter:     httprouter.New(),
 	}
@@ -58,7 +60,7 @@ const (
 // ProbeAuthScheme probes the http request for the requests for token or cookie session.
 func ProbeAuthScheme(r *http.Request) (string, error) {
 	_, tokenErr := GetToken(r)
-	_, sessErr := decodeCookieSession(r.Context(), r)
+	_, sessErr := session.DecodeCookieSession(r.Context(), r)
 
 	if tokenErr != nil && sessErr != nil {
 		return "", fmt.Errorf("token required")
@@ -135,7 +137,7 @@ func (h *AuthenticationHandler) isUserActive(ctx context.Context, auth platform.
 		return nil
 	}
 
-	return &platform.Error{Code: platform.EForbidden, Msg: "User is inactive"}
+	return &errors2.Error{Code: errors2.EForbidden, Msg: "User is inactive"}
 }
 
 func (h *AuthenticationHandler) extractAuthorization(ctx context.Context, r *http.Request) (platform.Authorizer, error) {
@@ -161,7 +163,7 @@ func (h *AuthenticationHandler) extractAuthorization(ctx context.Context, r *htt
 }
 
 func (h *AuthenticationHandler) extractSession(ctx context.Context, r *http.Request) (*platform.Session, error) {
-	k, err := decodeCookieSession(ctx, r)
+	k, err := session.DecodeCookieSession(ctx, r)
 	if err != nil {
 		return nil, err
 	}

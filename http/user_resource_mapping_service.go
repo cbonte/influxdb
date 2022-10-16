@@ -9,13 +9,25 @@ import (
 
 	"github.com/influxdata/httprouter"
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/pkg/httpc"
 	"go.uber.org/zap"
 )
 
 type resourceUserResponse struct {
 	Role influxdb.UserType `json:"role"`
-	*UserResponse
+	*influxdb.UserResponse
+}
+
+func newUserResponse(u *influxdb.User) *influxdb.UserResponse {
+	return &influxdb.UserResponse{
+		Links: map[string]string{
+			"self": fmt.Sprintf("/api/v2/users/%s", u.ID),
+			"logs": fmt.Sprintf("/api/v2/users/%s/logs", u.ID),
+		},
+		User: *u,
+	}
 }
 
 func newResourceUserResponse(u *influxdb.User, userType influxdb.UserType) *resourceUserResponse {
@@ -47,7 +59,7 @@ func newResourceUsersResponse(opts influxdb.FindOptions, f influxdb.UserResource
 // MemberBackend is all services and associated parameters required to construct
 // member handler.
 type MemberBackend struct {
-	influxdb.HTTPErrorHandler
+	errors.HTTPErrorHandler
 	log *zap.Logger
 
 	ResourceType influxdb.ResourceType
@@ -94,21 +106,21 @@ func newPostMemberHandler(b MemberBackend) http.HandlerFunc {
 }
 
 type postMemberRequest struct {
-	MemberID   influxdb.ID
-	ResourceID influxdb.ID
+	MemberID   platform.ID
+	ResourceID platform.ID
 }
 
 func decodePostMemberRequest(ctx context.Context, r *http.Request) (*postMemberRequest, error) {
 	params := httprouter.ParamsFromContext(ctx)
 	id := params.ByName("id")
 	if id == "" {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "url missing id",
 		}
 	}
 
-	var rid influxdb.ID
+	var rid platform.ID
 	if err := rid.DecodeFromString(id); err != nil {
 		return nil, err
 	}
@@ -119,8 +131,8 @@ func decodePostMemberRequest(ctx context.Context, r *http.Request) (*postMemberR
 	}
 
 	if !u.ID.Valid() {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "user id missing or invalid",
 		}
 	}
@@ -177,21 +189,21 @@ func newGetMembersHandler(b MemberBackend) http.HandlerFunc {
 }
 
 type getMembersRequest struct {
-	MemberID   influxdb.ID
-	ResourceID influxdb.ID
+	MemberID   platform.ID
+	ResourceID platform.ID
 }
 
 func decodeGetMembersRequest(ctx context.Context, r *http.Request) (*getMembersRequest, error) {
 	params := httprouter.ParamsFromContext(ctx)
 	id := params.ByName("id")
 	if id == "" {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "url missing id",
 		}
 	}
 
-	var i influxdb.ID
+	var i platform.ID
 	if err := i.DecodeFromString(id); err != nil {
 		return nil, err
 	}
@@ -224,34 +236,34 @@ func newDeleteMemberHandler(b MemberBackend) http.HandlerFunc {
 }
 
 type deleteMemberRequest struct {
-	MemberID   influxdb.ID
-	ResourceID influxdb.ID
+	MemberID   platform.ID
+	ResourceID platform.ID
 }
 
 func decodeDeleteMemberRequest(ctx context.Context, r *http.Request) (*deleteMemberRequest, error) {
 	params := httprouter.ParamsFromContext(ctx)
 	id := params.ByName("id")
 	if id == "" {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "url missing resource id",
 		}
 	}
 
-	var rid influxdb.ID
+	var rid platform.ID
 	if err := rid.DecodeFromString(id); err != nil {
 		return nil, err
 	}
 
 	id = params.ByName("userID")
 	if id == "" {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "url missing member id",
 		}
 	}
 
-	var mid influxdb.ID
+	var mid platform.ID
 	if err := mid.DecodeFromString(id); err != nil {
 		return nil, err
 	}
@@ -304,7 +316,7 @@ func (s *UserResourceMappingService) CreateUserResourceMapping(ctx context.Conte
 }
 
 // DeleteUserResourceMapping will delete user resource mapping based in criteria.
-func (s *UserResourceMappingService) DeleteUserResourceMapping(ctx context.Context, resourceID influxdb.ID, userID influxdb.ID) error {
+func (s *UserResourceMappingService) DeleteUserResourceMapping(ctx context.Context, resourceID platform.ID, userID platform.ID) error {
 	urlPath := resourceIDUserPath(influxdb.OrgsResourceType, resourceID, influxdb.Member, userID)
 	return s.Client.
 		Delete(urlPath).
@@ -366,17 +378,17 @@ func (s *SpecificURMSvc) CreateUserResourceMapping(ctx context.Context, m *influ
 }
 
 // DeleteUserResourceMapping will delete user resource mapping based in criteria.
-func (s *SpecificURMSvc) DeleteUserResourceMapping(ctx context.Context, resourceID influxdb.ID, userID influxdb.ID) error {
+func (s *SpecificURMSvc) DeleteUserResourceMapping(ctx context.Context, resourceID platform.ID, userID platform.ID) error {
 	urlPath := resourceIDUserPath(s.rt, resourceID, s.ut, userID)
 	return s.Client.
 		Delete(urlPath).
 		Do(ctx)
 }
 
-func resourceIDPath(resourceType influxdb.ResourceType, resourceID influxdb.ID, p string) string {
+func resourceIDPath(resourceType influxdb.ResourceType, resourceID platform.ID, p string) string {
 	return path.Join("/api/v2/", string(resourceType), resourceID.String(), p)
 }
 
-func resourceIDUserPath(resourceType influxdb.ResourceType, resourceID influxdb.ID, userType influxdb.UserType, userID influxdb.ID) string {
+func resourceIDUserPath(resourceType influxdb.ResourceType, resourceID platform.ID, userType influxdb.UserType, userID platform.ID) string {
 	return path.Join("/api/v2/", string(resourceType), resourceID.String(), string(userType)+"s", userID.String())
 }

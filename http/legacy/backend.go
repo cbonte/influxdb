@@ -7,7 +7,7 @@ import (
 	"github.com/influxdata/influxdb/v2/http/metric"
 	"github.com/influxdata/influxdb/v2/influxql"
 	"github.com/influxdata/influxdb/v2/kit/cli"
-	"github.com/influxdata/influxdb/v2/query"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/storage"
 	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
@@ -15,14 +15,14 @@ import (
 
 // Handler is a collection of all the service handlers.
 type Handler struct {
-	influxdb.HTTPErrorHandler
+	errors.HTTPErrorHandler
 	PointsWriterHandler *WriteHandler
 	PingHandler         *PingHandler
 	InfluxQLHandler     *InfluxqlHandler
 }
 
 type Backend struct {
-	influxdb.HTTPErrorHandler
+	errors.HTTPErrorHandler
 	Logger            *zap.Logger
 	MaxBatchSizeBytes int64
 
@@ -31,14 +31,12 @@ type Backend struct {
 	OrganizationService   influxdb.OrganizationService
 	BucketService         influxdb.BucketService
 	PointsWriter          storage.PointsWriter
-	DBRPMappingServiceV2  influxdb.DBRPMappingServiceV2
-	ProxyQueryService     query.ProxyQueryService
+	DBRPMappingService    influxdb.DBRPMappingService
 	InfluxqldQueryService influxql.ProxyQueryService
 }
 
 // HandlerConfig provides configuration for the legacy handler.
 type HandlerConfig struct {
-	Version           string
 	DefaultRoutingKey string
 }
 

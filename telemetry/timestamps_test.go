@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogo/protobuf/proto"
 	pr "github.com/influxdata/influxdb/v2/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"google.golang.org/protobuf/proto"
 )
 
 func goodMetricWithTime() *dto.MetricFamily {
@@ -15,7 +15,7 @@ func goodMetricWithTime() *dto.MetricFamily {
 		Name: proto.String("good"),
 		Type: dto.MetricType_COUNTER.Enum(),
 		Metric: []*dto.Metric{
-			&dto.Metric{
+			{
 				Label: []*dto.LabelPair{pr.L("n1", "v1")},
 				Counter: &dto.Counter{
 					Value: proto.Float64(1.0),

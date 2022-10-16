@@ -87,6 +87,8 @@ func NewLogFile(sfile *tsdb.SeriesFile, path string) *LogFile {
 
 // bytes estimates the memory footprint of this LogFile, in bytes.
 func (f *LogFile) bytes() int {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
 	var b int
 	b += 24 // mu RWMutex is 24 bytes
 	b += 16 // wg WaitGroup is 16 bytes
@@ -154,10 +156,10 @@ func (f *LogFile) open() error {
 	for buf := f.data; len(buf) > 0; {
 		// Read next entry. Truncate partial writes.
 		var e LogEntry
-		if err := e.UnmarshalBinary(buf); err == io.ErrShortBuffer || err == ErrLogEntryChecksumMismatch {
+		if err := e.UnmarshalBinary(buf); errors.Is(err, io.ErrShortBuffer) || errors.Is(err, ErrLogEntryChecksumMismatch) {
 			break
 		} else if err != nil {
-			return err
+			return fmt.Errorf("%q: %w", f.path, err)
 		}
 
 		// Execute entry against in-memory index.
@@ -263,6 +265,13 @@ func (f *LogFile) Size() int64 {
 	return v
 }
 
+// ModTime returns the last modified time of the file
+func (f *LogFile) ModTime() time.Time {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.modTime
+}
+
 // Measurement returns a measurement element.
 func (f *LogFile) Measurement(name []byte) MeasurementElem {
 	f.mu.RLock()
@@ -285,13 +294,7 @@ func (f *LogFile) MeasurementHasSeries(ss *tsdb.SeriesIDSet, name []byte) bool {
 		return false
 	}
 
-	// TODO(edd): if mm is using a seriesSet then this could be changed to do a fast intersection.
-	for _, id := range mm.seriesIDs() {
-		if ss.Contains(id) {
-			return true
-		}
-	}
-	return false
+	return mm.hasSeries(ss)
 }
 
 // MeasurementNames returns an ordered list of measurement names.
@@ -680,7 +683,7 @@ func (f *LogFile) execSeriesEntry(e *LogEntry) {
 	// the entire database and the server is restarted. This would cause
 	// the log to replay its insert but the key cannot be found.
 	//
-	// https://github.com/influxdata/influxdb/v2/issues/9444
+	// https://github.com/influxdata/influxdb/issues/9444
 	if seriesKey == nil {
 		return
 	}
@@ -1298,6 +1301,20 @@ func (m *logMeasurement) seriesIDSet() *tsdb.SeriesIDSet {
 		ss.AddNoLock(seriesID)
 	}
 	return ss
+}
+
+func (m *logMeasurement) hasSeries(ss *tsdb.SeriesIDSet) bool {
+	if m.seriesSet != nil {
+		return m.seriesSet.Intersects(ss)
+	}
+
+	for seriesID := range m.series {
+		if ss.Contains(seriesID) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (m *logMeasurement) Name() []byte  { return m.name }

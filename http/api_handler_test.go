@@ -3,7 +3,7 @@ package http
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,10 +11,65 @@ import (
 	"github.com/google/go-cmp/cmp"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"github.com/influxdata/influxdb/v2/pkg/httpc"
+	"github.com/stretchr/testify/require"
 	"github.com/yudai/gojsondiff"
 	"github.com/yudai/gojsondiff/formatter"
 	"go.uber.org/zap/zaptest"
 )
+
+func TestAPIHandlerServeLinks(t *testing.T) {
+	tests := []struct {
+		name   string
+		path   string
+		method string
+		want   int
+	}{
+		{
+			name:   "correct path - GET",
+			path:   "/api/v2",
+			method: "GET",
+			want:   http.StatusOK,
+		},
+		{
+			name:   "correct path with slash - GET",
+			path:   "/api/v2/",
+			method: "GET",
+			want:   http.StatusOK,
+		},
+		{
+			name:   "correct path - POST",
+			path:   "/api/v2",
+			method: "POST",
+			want:   http.StatusOK,
+		},
+		{
+			name:   "incorrect arbitrary path",
+			path:   "/api/v2/asdf",
+			method: "GET",
+			want:   http.StatusNotFound,
+		},
+		{
+			// regression test for https://github.com/influxdata/influxdb/issues/21620
+			name:   "incorrect path at a subroute",
+			path:   "/api/v2/query&foo=bar",
+			method: "GET",
+			want:   http.StatusNotFound,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(tt.method, tt.path, nil)
+			w := httptest.NewRecorder()
+			h := NewAPIHandler(&APIBackend{Logger: zaptest.NewLogger(t)})
+
+			h.ServeHTTP(w, r)
+
+			res := w.Result()
+			require.Equal(t, tt.want, res.StatusCode)
+		})
+	}
+}
 
 func TestAPIHandler_NotFound(t *testing.T) {
 	type args struct {
@@ -57,7 +112,7 @@ func TestAPIHandler_NotFound(t *testing.T) {
 			w := httptest.NewRecorder()
 
 			b := &APIBackend{
-				HTTPErrorHandler: kithttp.ErrorHandler(0),
+				HTTPErrorHandler: kithttp.NewErrorHandler(zaptest.NewLogger(t)),
 				Logger:           zaptest.NewLogger(t),
 			}
 
@@ -66,7 +121,7 @@ func TestAPIHandler_NotFound(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. get %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)

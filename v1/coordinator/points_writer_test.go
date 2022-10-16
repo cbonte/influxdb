@@ -1,8 +1,8 @@
 package coordinator_test
 
 import (
+	"context"
 	"fmt"
-	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -82,7 +82,7 @@ func TestPointsWriter_MapShards_AlterShardDuration(t *testing.T) {
 		return &sg, nil
 	}
 
-	c := coordinator.NewPointsWriter()
+	c := coordinator.NewPointsWriter(time.Second, "")
 	c.MetaClient = ms
 
 	pr := &coordinator.WritePointsRequest{
@@ -160,7 +160,7 @@ func TestPointsWriter_MapShards_Multiple(t *testing.T) {
 		panic("should not get here")
 	}
 
-	c := coordinator.NewPointsWriter()
+	c := coordinator.NewPointsWriter(time.Second, "")
 	c.MetaClient = ms
 	defer c.Close()
 	pr := &coordinator.WritePointsRequest{
@@ -216,7 +216,7 @@ func TestPointsWriter_MapShards_Invalid(t *testing.T) {
 		return &rp.ShardGroups[0], nil
 	}
 
-	c := coordinator.NewPointsWriter()
+	c := coordinator.NewPointsWriter(time.Second, "")
 	c.MetaClient = ms
 	defer c.Close()
 	pr := &coordinator.WritePointsRequest{
@@ -258,7 +258,6 @@ func TestPointsWriter_WritePoints(t *testing.T) {
 			name:            "write one success",
 			database:        "mydb",
 			retentionPolicy: "myrp",
-			err:             []error{nil, nil, nil},
 			expErr:          nil,
 		},
 
@@ -267,7 +266,6 @@ func TestPointsWriter_WritePoints(t *testing.T) {
 			name:            "write to non-existent database",
 			database:        "doesnt_exist",
 			retentionPolicy: "",
-			err:             []error{nil, nil, nil},
 			expErr:          fmt.Errorf("database not found: doesnt_exist"),
 		},
 	}
@@ -290,7 +288,6 @@ func TestPointsWriter_WritePoints(t *testing.T) {
 		pr.AddPoint("cpu", 3.0, time.Now().Add(time.Hour+time.Second), nil)
 
 		// copy to prevent data race
-		theTest := test
 		sm := coordinator.NewShardMapping(16)
 		sm.MapPoint(
 			&meta.ShardInfo{ID: uint64(1), Owners: []meta.ShardOwner{
@@ -319,10 +316,10 @@ func TestPointsWriter_WritePoints(t *testing.T) {
 		var mu sync.Mutex
 
 		store := &fakeStore{
-			WriteFn: func(shardID uint64, points []models.Point) error {
+			WriteFn: func(_ context.Context, shardID uint64, points []models.Point) error {
 				mu.Lock()
 				defer mu.Unlock()
-				return theTest.err[0]
+				return nil
 			},
 		}
 
@@ -331,22 +328,15 @@ func TestPointsWriter_WritePoints(t *testing.T) {
 		}
 		ms.NodeIDFn = func() uint64 { return 1 }
 
-		subPoints := make(chan *coordinator.WritePointsRequest, 1)
-		sub := Subscriber{}
-		sub.PointsFn = func() chan<- *coordinator.WritePointsRequest {
-			return subPoints
-		}
-
-		c := coordinator.NewPointsWriter()
+		c := coordinator.NewPointsWriter(time.Second, "")
 		c.MetaClient = ms
 		c.TSDBStore = store
-		c.AddWriteSubscriber(sub.Points())
 		c.Node = &influxdb.Node{ID: 1}
 
 		c.Open()
 		defer c.Close()
 
-		err := c.WritePointsPrivileged(pr.Database, pr.RetentionPolicy, models.ConsistencyLevelOne, pr.Points)
+		err := c.WritePointsPrivileged(context.Background(), pr.Database, pr.RetentionPolicy, models.ConsistencyLevelOne, pr.Points)
 		if err == nil && test.expErr != nil {
 			t.Errorf("PointsWriter.WritePointsPrivileged(): '%s' error: got %v, exp %v", test.name, err, test.expErr)
 		}
@@ -356,16 +346,6 @@ func TestPointsWriter_WritePoints(t *testing.T) {
 		}
 		if err != nil && test.expErr != nil && err.Error() != test.expErr.Error() {
 			t.Errorf("PointsWriter.WritePointsPrivileged(): '%s' error: got %v, exp %v", test.name, err, test.expErr)
-		}
-		if test.expErr == nil {
-			select {
-			case p := <-subPoints:
-				if !reflect.DeepEqual(p, pr) {
-					t.Errorf("PointsWriter.WritePointsPrivileged(): '%s' error: unexpected WritePointsRequest got %v, exp %v", test.name, p, pr)
-				}
-			default:
-				t.Errorf("PointsWriter.WritePointsPrivileged(): '%s' error: Subscriber.Points not called", test.name)
-			}
 		}
 	}
 }
@@ -395,7 +375,7 @@ func TestPointsWriter_WritePoints_Dropped(t *testing.T) {
 	var mu sync.Mutex
 
 	store := &fakeStore{
-		WriteFn: func(shardID uint64, points []models.Point) error {
+		WriteFn: func(_ context.Context, shardID uint64, points []models.Point) error {
 			mu.Lock()
 			defer mu.Unlock()
 			return nil
@@ -407,22 +387,15 @@ func TestPointsWriter_WritePoints_Dropped(t *testing.T) {
 	}
 	ms.NodeIDFn = func() uint64 { return 1 }
 
-	subPoints := make(chan *coordinator.WritePointsRequest, 1)
-	sub := Subscriber{}
-	sub.PointsFn = func() chan<- *coordinator.WritePointsRequest {
-		return subPoints
-	}
-
-	c := coordinator.NewPointsWriter()
+	c := coordinator.NewPointsWriter(time.Second, "")
 	c.MetaClient = ms
 	c.TSDBStore = store
-	c.AddWriteSubscriber(sub.Points())
 	c.Node = &influxdb.Node{ID: 1}
 
 	c.Open()
 	defer c.Close()
 
-	err := c.WritePointsPrivileged(pr.Database, pr.RetentionPolicy, models.ConsistencyLevelOne, pr.Points)
+	err := c.WritePointsPrivileged(context.Background(), pr.Database, pr.RetentionPolicy, models.ConsistencyLevelOne, pr.Points)
 	if _, ok := err.(tsdb.PartialWriteError); !ok {
 		t.Errorf("PointsWriter.WritePoints(): got %v, exp %v", err, tsdb.PartialWriteError{})
 	}
@@ -431,16 +404,16 @@ func TestPointsWriter_WritePoints_Dropped(t *testing.T) {
 var shardID uint64
 
 type fakeStore struct {
-	WriteFn       func(shardID uint64, points []models.Point) error
-	CreateShardfn func(database, retentionPolicy string, shardID uint64, enabled bool) error
+	WriteFn       func(ctx context.Context, shardID uint64, points []models.Point) error
+	CreateShardfn func(ctx context.Context, database, retentionPolicy string, shardID uint64, enabled bool) error
 }
 
-func (f *fakeStore) WriteToShard(shardID uint64, points []models.Point) error {
-	return f.WriteFn(shardID, points)
+func (f *fakeStore) WriteToShard(ctx context.Context, shardID uint64, points []models.Point) error {
+	return f.WriteFn(ctx, shardID, points)
 }
 
-func (f *fakeStore) CreateShard(database, retentionPolicy string, shardID uint64, enabled bool) error {
-	return f.CreateShardfn(database, retentionPolicy, shardID, enabled)
+func (f *fakeStore) CreateShard(ctx context.Context, database, retentionPolicy string, shardID uint64, enabled bool) error {
+	return f.CreateShardfn(ctx, database, retentionPolicy, shardID, enabled)
 }
 
 func NewPointsWriterMetaClient() *PointsWriterMetaClient {

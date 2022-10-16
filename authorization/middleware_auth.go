@@ -6,6 +6,8 @@ import (
 
 	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/authorizer"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 )
 
 type AuthedAuthorizationService struct {
@@ -32,6 +34,11 @@ func (s *AuthedAuthorizationService) CreateAuthorization(ctx context.Context, a 
 	if err := authorizer.VerifyPermissions(ctx, a.Permissions); err != nil {
 		return err
 	}
+	for _, v := range a.Permissions {
+		if v.Resource.Type == influxdb.InstanceResourceType {
+			return fmt.Errorf("authorizations cannot be created with the instance type, it is only used during setup")
+		}
+	}
 
 	return s.s.CreateAuthorization(ctx, a)
 }
@@ -50,7 +57,7 @@ func (s *AuthedAuthorizationService) FindAuthorizationByToken(ctx context.Contex
 	return a, nil
 }
 
-func (s *AuthedAuthorizationService) FindAuthorizationByID(ctx context.Context, id influxdb.ID) (*influxdb.Authorization, error) {
+func (s *AuthedAuthorizationService) FindAuthorizationByID(ctx context.Context, id platform.ID) (*influxdb.Authorization, error) {
 	a, err := s.s.FindAuthorizationByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -74,7 +81,7 @@ func (s *AuthedAuthorizationService) FindAuthorizations(ctx context.Context, fil
 	return authorizer.AuthorizeFindAuthorizations(ctx, as)
 }
 
-func (s *AuthedAuthorizationService) UpdateAuthorization(ctx context.Context, id influxdb.ID, upd *influxdb.AuthorizationUpdate) (*influxdb.Authorization, error) {
+func (s *AuthedAuthorizationService) UpdateAuthorization(ctx context.Context, id platform.ID, upd *influxdb.AuthorizationUpdate) (*influxdb.Authorization, error) {
 	a, err := s.s.FindAuthorizationByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -88,7 +95,7 @@ func (s *AuthedAuthorizationService) UpdateAuthorization(ctx context.Context, id
 	return s.s.UpdateAuthorization(ctx, id, upd)
 }
 
-func (s *AuthedAuthorizationService) DeleteAuthorization(ctx context.Context, id influxdb.ID) error {
+func (s *AuthedAuthorizationService) DeleteAuthorization(ctx context.Context, id platform.ID) error {
 	a, err := s.s.FindAuthorizationByID(ctx, id)
 	if err != nil {
 		return err
@@ -106,10 +113,10 @@ func (s *AuthedAuthorizationService) DeleteAuthorization(ctx context.Context, id
 func VerifyPermissions(ctx context.Context, ps []influxdb.Permission) error {
 	for _, p := range ps {
 		if err := authorizer.IsAllowed(ctx, p); err != nil {
-			return &influxdb.Error{
+			return &errors.Error{
 				Err:  err,
 				Msg:  fmt.Sprintf("permission %s is not allowed", p),
-				Code: influxdb.EForbidden,
+				Code: errors.EForbidden,
 			}
 		}
 	}

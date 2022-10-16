@@ -6,9 +6,10 @@ package mocks
 
 import (
 	context "context"
-	gomock "github.com/golang/mock/gomock"
-	influxdb "github.com/influxdata/influxdb/v2"
 	reflect "reflect"
+
+	gomock "github.com/golang/mock/gomock"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 )
 
 // MockPasswordComparer is a mock of PasswordComparer interface
@@ -35,7 +36,7 @@ func (m *MockPasswordComparer) EXPECT() *MockPasswordComparerMockRecorder {
 }
 
 // ComparePassword mocks base method
-func (m *MockPasswordComparer) ComparePassword(arg0 context.Context, arg1 influxdb.ID, arg2 string) error {
+func (m *MockPasswordComparer) ComparePassword(arg0 context.Context, arg1 platform.ID, arg2 string) error {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ComparePassword", arg0, arg1, arg2)
 	ret0, _ := ret[0].(error)

@@ -1,7 +1,6 @@
 package tenant
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -44,7 +43,6 @@ func NewHTTPOnboardHandler(log *zap.Logger, onboardSvc influxdb.OnboardingServic
 	r.Route("/", func(r chi.Router) {
 		r.Post("/", svr.handleInitialOnboardRequest)
 		r.Get("/", svr.handleIsOnboarding)
-		r.Post("/user", svr.handleOnboardRequest)
 
 	})
 
@@ -76,8 +74,8 @@ func (h *OnboardHandler) handleIsOnboarding(w http.ResponseWriter, r *http.Reque
 // handleInitialOnboardRequest is the HTTP handler for the GET /api/v2/setup route.
 func (h *OnboardHandler) handleInitialOnboardRequest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	req, err := decodeOnboardRequest(ctx, r)
-	if err != nil {
+	req := &influxdb.OnboardingRequest{}
+	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
 		h.api.Err(w, r, err)
 		return
 	}
@@ -91,29 +89,11 @@ func (h *OnboardHandler) handleInitialOnboardRequest(w http.ResponseWriter, r *h
 	h.api.Respond(w, r, http.StatusCreated, NewOnboardingResponse(results))
 }
 
-// isOnboarding is the HTTP handler for the POST /api/v2/setup route.
-func (h *OnboardHandler) handleOnboardRequest(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	req, err := decodeOnboardRequest(ctx, r)
-	if err != nil {
-		h.api.Err(w, r, err)
-		return
-	}
-	results, err := h.onboardingSvc.OnboardUser(ctx, req)
-	if err != nil {
-		h.api.Err(w, r, err)
-		return
-	}
-	h.log.Debug("Onboarding setup completed", zap.String("results", fmt.Sprint(results)))
-
-	h.api.Respond(w, r, http.StatusCreated, NewOnboardingResponse(results))
-}
-
 type onboardingResponse struct {
-	User         *UserResponse   `json:"user"`
-	Bucket       *bucketResponse `json:"bucket"`
-	Organization orgResponse     `json:"org"`
-	Auth         *authResponse   `json:"auth"`
+	User         *influxdb.UserResponse `json:"user"`
+	Bucket       *bucketResponse        `json:"bucket"`
+	Organization orgResponse            `json:"org"`
+	Auth         *authResponse          `json:"auth"`
 }
 
 func NewOnboardingResponse(results *influxdb.OnboardingResults) *onboardingResponse {
@@ -123,15 +103,6 @@ func NewOnboardingResponse(results *influxdb.OnboardingResults) *onboardingRespo
 		Organization: newOrgResponse(*results.Org),
 		Auth:         newAuthResponse(results.Auth),
 	}
-}
-
-func decodeOnboardRequest(ctx context.Context, r *http.Request) (*influxdb.OnboardingRequest, error) {
-	req := &influxdb.OnboardingRequest{}
-	if err := json.NewDecoder(r.Body).Decode(req); err != nil {
-		return nil, err
-	}
-
-	return req, nil
 }
 
 type authResponse struct {

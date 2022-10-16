@@ -3,7 +3,7 @@ package upgrade
 import (
 	"context"
 	"errors"
-	"github.com/influxdata/influxdb/v2/pkg/testing/assert"
+	"fmt"
 	"reflect"
 	"sort"
 	"testing"
@@ -13,8 +13,10 @@ import (
 	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/authorization"
 	"github.com/influxdata/influxdb/v2/inmem"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kv/migration"
 	"github.com/influxdata/influxdb/v2/kv/migration/all"
+	"github.com/influxdata/influxdb/v2/pkg/testing/assert"
 	"github.com/influxdata/influxdb/v2/tenant"
 	authv1 "github.com/influxdata/influxdb/v2/v1/authorization"
 	"github.com/influxdata/influxdb/v2/v1/services/meta"
@@ -30,7 +32,7 @@ func TestUpgradeSecurity(t *testing.T) {
 	type testCase struct {
 		name    string
 		users   []meta.UserInfo
-		db2ids  map[string][]influxdb.ID
+		db2ids  map[string][]platform.ID
 		wantErr error
 		want    []*influxdb.Authorization
 	}
@@ -90,7 +92,7 @@ func TestUpgradeSecurity(t *testing.T) {
 					},
 				},
 			},
-			db2ids: map[string][]influxdb.ID{
+			db2ids: map[string][]platform.ID{
 				"water": {0x33f9d67bc9cbc5b7, 0x33f9d67bc9cbc5b8, 0x33f9d67bc9cbc5b9},
 				"air":   {0x43f9d67bc9cbc5b7, 0x43f9d67bc9cbc5b8, 0x43f9d67bc9cbc5b9},
 				"hits":  {0x53f9d67bc9cbc5b7},
@@ -183,11 +185,11 @@ func TestUpgradeSecurity(t *testing.T) {
 
 			// onboard admin
 			oReq := &influxdb.OnboardingRequest{
-				User:            "admin",
-				Password:        "12345678",
-				Org:             "testers",
-				Bucket:          "def",
-				RetentionPeriod: influxdb.InfiniteRetention,
+				User:                   "admin",
+				Password:               "12345678",
+				Org:                    "testers",
+				Bucket:                 "def",
+				RetentionPeriodSeconds: influxdb.InfiniteRetention,
 			}
 			oResp, err := setupAdmin(ctx, v2, oReq)
 			require.NoError(t, err)
@@ -199,6 +201,19 @@ func TestUpgradeSecurity(t *testing.T) {
 				token:    oResp.Auth.Token,
 				orgID:    oResp.Auth.OrgID,
 				userID:   oResp.Auth.UserID,
+			}
+
+			for k, v := range tc.db2ids {
+				for i, id := range v {
+					b := &influxdb.Bucket{
+						ID:    id,
+						Name:  fmt.Sprintf("%s_%d", k, id),
+						OrgID: targetOptions.orgID,
+					}
+					err := tenantSvc.CreateBucket(context.Background(), b)
+					require.NoError(t, err)
+					tc.db2ids[k][i] = b.ID
+				}
 			}
 
 			// fill in expected permissions now that we know IDs

@@ -2,19 +2,24 @@ package tsi1_test
 
 import (
 	"compress/gzip"
+	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"regexp"
 	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/influxdata/influxdb/v2/models"
 	"github.com/influxdata/influxdb/v2/tsdb"
 	"github.com/influxdata/influxdb/v2/tsdb/index/tsi1"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // Bloom filter settings used in tests.
@@ -207,6 +212,30 @@ func TestIndex_DropMeasurement(t *testing.T) {
 	})
 }
 
+func TestIndex_OpenFail(t *testing.T) {
+	idx := NewDefaultIndex()
+	require.NoError(t, idx.Open())
+	idx.Index.Close()
+	// mess up the index:
+	tslPath := path.Join(idx.Index.Path(), "3", "L0-00000001.tsl")
+	tslFile, err := os.OpenFile(tslPath, os.O_RDWR, 0666)
+	require.NoError(t, err)
+	require.NoError(t, tslFile.Truncate(0))
+	// write poisonous TSL file - first byte doesn't matter, remaining bytes are an invalid uvarint
+	_, err = tslFile.Write([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	require.NoError(t, err)
+	require.NoError(t, tslFile.Close())
+	idx.Index = tsi1.NewIndex(idx.SeriesFile.SeriesFile, "db0", tsi1.WithPath(idx.Index.Path()))
+	err = idx.Index.Open()
+	require.Error(t, err, "expected an error on opening the index")
+	require.Contains(t, err.Error(), ".tsl\": parsing binary-encoded uint64 value failed; binary.Uvarint() returned -11")
+	// ensure each partition is closed:
+	for i := 0; i < int(idx.Index.PartitionN); i++ {
+		assert.Equal(t, idx.Index.PartitionAt(i).FileN(), 0)
+	}
+	require.NoError(t, idx.Close())
+}
+
 func TestIndex_Open(t *testing.T) {
 	// Opening a fresh index should set the MANIFEST version to current version.
 	idx := NewDefaultIndex()
@@ -220,6 +249,13 @@ func TestIndex_Open(t *testing.T) {
 			partition := idx.PartitionAt(i)
 			if got, exp := partition.Manifest().Version, 1; got != exp {
 				t.Fatalf("got index version %d, expected %d", got, exp)
+			}
+		}
+
+		for i := 0; i < int(idx.PartitionN); i++ {
+			p := idx.PartitionAt(i)
+			if got, exp := p.NeedsCompaction(false), false; got != exp {
+				t.Fatalf("got needs compaction %v, expected %v", got, exp)
 			}
 		}
 	})
@@ -253,7 +289,7 @@ func TestIndex_Open(t *testing.T) {
 			}
 
 			// Log the MANIFEST file.
-			data, err := ioutil.ReadFile(mpath)
+			data, err := os.ReadFile(mpath)
 			if err != nil {
 				panic(err)
 			}
@@ -262,7 +298,7 @@ func TestIndex_Open(t *testing.T) {
 			// Opening this index should return an error because the MANIFEST has an
 			// incompatible version.
 			err = idx.Open()
-			if err != tsi1.ErrIncompatibleVersion {
+			if !errors.Is(err, tsi1.ErrIncompatibleVersion) {
 				idx.Close()
 				t.Fatalf("got error %v, expected %v", err, tsi1.ErrIncompatibleVersion)
 			}
@@ -298,15 +334,25 @@ func TestIndex_DiskSizeBytes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Verify on disk size is the same in each stage.
-	// Each series stores flag(1) + series(uvarint(2)) + len(name)(1) + len(key)(1) + len(value)(1) + checksum(4).
-	expSize := int64(4 * 9)
+	idx.RunStateAware(t, func(t *testing.T, state int) {
+		// Each MANIFEST file is 419 bytes and there are tsi1.DefaultPartitionN of them
+		expSize := int64(tsi1.DefaultPartitionN * 419)
+		switch state {
+		case Initial:
+			fallthrough
+		case Reopen:
+			// In the log file, each series stores flag(1) + series(uvarint(2)) + len(name)(1) + len(key)(1) + len(value)(1) + checksum(4).
+			expSize += 4 * 9
+		case PostCompaction:
+			fallthrough
+		case PostCompactionReopen:
+			// For TSI files after a compaction, instead of 4*9, we have encoded measurement names, tag names, etc which is larger
+			expSize += 2202
+		}
 
-	// Each MANIFEST file is 419 bytes and there are tsi1.DefaultPartitionN of them
-	expSize += int64(tsi1.DefaultPartitionN * 419)
-
-	idx.Run(t, func(t *testing.T) {
 		if got, exp := idx.DiskSizeBytes(), expSize; got != exp {
+			// We had some odd errors - if the size is unexpected, log it
+			idx.Index.LogDiskSize(t)
 			t.Fatalf("got %d bytes, expected %d", got, exp)
 		}
 	})
@@ -510,14 +556,18 @@ func (idx Index) Open() error {
 // Close closes and removes the index directory.
 func (idx *Index) Close() error {
 	defer os.RemoveAll(idx.Path())
+	// Series file is opened first and must be closed last
+	if err := idx.Index.Close(); err != nil {
+		return err
+	}
 	if err := idx.SeriesFile.Close(); err != nil {
 		return err
 	}
-	return idx.Index.Close()
+	return nil
 }
 
 // Reopen closes and opens the index.
-func (idx *Index) Reopen() error {
+func (idx *Index) Reopen(maxLogSize int64) error {
 	if err := idx.Index.Close(); err != nil {
 		return err
 	}
@@ -529,9 +579,22 @@ func (idx *Index) Reopen() error {
 	}
 
 	partitionN := idx.Index.PartitionN // Remember how many partitions to use.
-	idx.Index = tsi1.NewIndex(idx.SeriesFile.SeriesFile, "db0", tsi1.WithPath(idx.Index.Path()))
+	idx.Index = tsi1.NewIndex(idx.SeriesFile.SeriesFile, "db0", tsi1.WithPath(idx.Index.Path()), tsi1.WithMaximumLogFileSize(maxLogSize))
 	idx.Index.PartitionN = partitionN
 	return idx.Open()
+}
+
+const (
+	Initial = iota
+	Reopen
+	PostCompaction
+	PostCompactionReopen
+)
+
+func curryState(state int, f func(t *testing.T, state int)) func(t *testing.T) {
+	return func(t *testing.T) {
+		f(t, state)
+	}
 }
 
 // Run executes a subtest for each of several different states:
@@ -544,27 +607,42 @@ func (idx *Index) Reopen() error {
 // The index should always respond in the same fashion regardless of
 // how data is stored. This helper allows the index to be easily tested
 // in all major states.
-func (idx *Index) Run(t *testing.T, fn func(t *testing.T)) {
+func (idx *Index) RunStateAware(t *testing.T, fn func(t *testing.T, state int)) {
 	// Invoke immediately.
-	t.Run("state=initial", fn)
+	t.Run("state=initial", curryState(Initial, fn))
 
 	// Reopen and invoke again.
-	if err := idx.Reopen(); err != nil {
+	if err := idx.Reopen(tsdb.DefaultMaxIndexLogFileSize); err != nil {
 		t.Fatalf("reopen error: %s", err)
 	}
-	t.Run("state=reopen", fn)
+	t.Run("state=reopen", curryState(Reopen, fn))
 
-	// TODO: Request a compaction.
-	// if err := idx.Compact(); err != nil {
-	// 	t.Fatalf("compact error: %s", err)
-	// }
-	// t.Run("state=post-compaction", fn)
+	// Reopen requiring a full compaction of the TSL files and invoke again.
+	idx.Reopen(1)
+	for {
+		needsCompaction := false
+		for i := 0; i < int(idx.PartitionN); i++ {
+			needsCompaction = needsCompaction || idx.PartitionAt(i).NeedsCompaction(false)
+		}
+		if !needsCompaction {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Run("state=post-compaction", curryState(PostCompaction, fn))
 
 	// Reopen and invoke again.
-	if err := idx.Reopen(); err != nil {
+	if err := idx.Reopen(tsdb.DefaultMaxIndexLogFileSize); err != nil {
 		t.Fatalf("post-compaction reopen error: %s", err)
 	}
-	t.Run("state=post-compaction-reopen", fn)
+	t.Run("state=post-compaction-reopen", curryState(PostCompactionReopen, fn))
+}
+
+// Run is the same is RunStateAware but for tests that do not depend on compaction state
+func (idx *Index) Run(t *testing.T, fn func(t *testing.T)) {
+	idx.RunStateAware(t, func(t *testing.T, _ int) {
+		fn(t)
+	})
 }
 
 // CreateSeriesSliceIfNotExists creates multiple series at a time.
@@ -667,7 +745,7 @@ func BenchmarkIndex_CreateSeriesListIfNotExists(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	data, err := ioutil.ReadAll(gzr)
+	data, err := io.ReadAll(gzr)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -748,7 +826,7 @@ func BenchmarkIndex_ConcurrentWriteQuery(b *testing.B) {
 		b.Fatal(err)
 	}
 
-	data, err := ioutil.ReadAll(gzr)
+	data, err := io.ReadAll(gzr)
 	if err != nil {
 		b.Fatal(err)
 	}

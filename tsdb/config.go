@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/v2/toml"
-	"github.com/influxdata/influxdb/v2/v1/monitor/diagnostics"
 )
 
 const (
@@ -81,6 +80,16 @@ type Config struct {
 	// General WAL configuration options
 	WALDir string `toml:"wal-dir"`
 
+	// WALMaxConcurrentWrites sets the max number of WAL writes that can be attempted at one time.
+	// In reality only one write to disk can run at a time, but we allow the preceding encoding steps
+	// to run concurrently. This can cause allocations to increase quickly when writing to a slow disk.
+	// Set to 0 to use the default (<nprocs> * 2).
+	WALMaxConcurrentWrites int `toml:"wal-max-concurrent-writes"`
+
+	// WALMaxWriteDelay is the max amount of time the WAL will wait to begin a write when there are
+	// already WALMaxConcurrentWrites in progress. A value of 0 disables any timeout.
+	WALMaxWriteDelay time.Duration `toml:"wal-max-write-delay"`
+
 	// WALFsyncDelay is the amount of time that a write will wait before fsyncing.  A duration
 	// greater than 0 can be used to batch up multiple fsync calls.  This is useful for slower
 	// disks or when WAL write contention is seen.  A value of 0 fsyncs every write to the WAL.
@@ -88,6 +97,9 @@ type Config struct {
 
 	// Enables unicode validation on series keys on write.
 	ValidateKeys bool `toml:"validate-keys"`
+
+	// When true, skips size validation on fields
+	SkipFieldSizeValidation bool `toml:"skip-field-size-validation"`
 
 	// Query logging
 	QueryLogEnabled bool `toml:"query-log-enabled"`
@@ -152,6 +164,8 @@ func NewConfig() Config {
 
 		MaxConcurrentCompactions: DefaultMaxConcurrentCompactions,
 
+		WALMaxWriteDelay: 10 * time.Minute,
+
 		MaxIndexLogFileSize:  toml.Size(DefaultMaxIndexLogFileSize),
 		SeriesIDSetCacheSize: DefaultSeriesIDSetCacheSize,
 
@@ -205,21 +219,4 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
-}
-
-// Diagnostics returns a diagnostics representation of a subset of the Config.
-func (c Config) Diagnostics() (*diagnostics.Diagnostics, error) {
-	return diagnostics.RowFromMap(map[string]interface{}{
-		"dir":                                    c.Dir,
-		"wal-dir":                                c.WALDir,
-		"wal-fsync-delay":                        c.WALFsyncDelay,
-		"cache-max-memory-size":                  c.CacheMaxMemorySize,
-		"cache-snapshot-memory-size":             c.CacheSnapshotMemorySize,
-		"cache-snapshot-write-cold-duration":     c.CacheSnapshotWriteColdDuration,
-		"compact-full-write-cold-duration":       c.CompactFullWriteColdDuration,
-		"max-concurrent-compactions":             c.MaxConcurrentCompactions,
-		"max-index-log-file-size":                c.MaxIndexLogFileSize,
-		"series-id-set-cache-size":               c.SeriesIDSetCacheSize,
-		"series-file-max-concurrent-compactions": c.SeriesFileMaxConcurrentSnapshotCompactions,
-	}), nil
 }

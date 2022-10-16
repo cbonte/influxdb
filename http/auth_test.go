@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -14,6 +14,8 @@ import (
 	platform "github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/authorization"
 	pcontext "github.com/influxdata/influxdb/v2/context"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"github.com/influxdata/influxdb/v2/kv"
 	"github.com/influxdata/influxdb/v2/mock"
@@ -83,7 +85,7 @@ func TestService_handleGetAuthorizations(t *testing.T) {
 					},
 				},
 				&mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*platform.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform2.ID) (*platform.User, error) {
 						return &platform.User{
 							ID:   id,
 							Name: id.String(),
@@ -91,7 +93,7 @@ func TestService_handleGetAuthorizations(t *testing.T) {
 					},
 				},
 				&mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*platform.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform2.ID) (*platform.Organization, error) {
 						return &platform.Organization{
 							ID:   id,
 							Name: id.String(),
@@ -176,18 +178,18 @@ func TestService_handleGetAuthorizations(t *testing.T) {
 					},
 				},
 				&mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*platform.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform2.ID) (*platform.User, error) {
 						if id.String() == "2070616e656d2076" {
 							return &platform.User{
 								ID:   id,
 								Name: id.String(),
 							}, nil
 						}
-						return nil, &platform.Error{}
+						return nil, &errors.Error{}
 					},
 				},
 				&mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*platform.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform2.ID) (*platform.Organization, error) {
 						return &platform.Organization{
 							ID:   id,
 							Name: id.String(),
@@ -254,7 +256,7 @@ func TestService_handleGetAuthorizations(t *testing.T) {
 					},
 				},
 				&mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*platform.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform2.ID) (*platform.User, error) {
 						return &platform.User{
 							ID:   id,
 							Name: id.String(),
@@ -262,14 +264,14 @@ func TestService_handleGetAuthorizations(t *testing.T) {
 					},
 				},
 				&mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*platform.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform2.ID) (*platform.Organization, error) {
 						if id.String() == "3070616e656d2076" {
 							return &platform.Organization{
 								ID:   id,
 								Name: id.String(),
 							}, nil
 						}
-						return nil, &platform.Error{}
+						return nil, &errors.Error{}
 					},
 				},
 			},
@@ -333,7 +335,7 @@ func TestService_handleGetAuthorizations(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			authorizationBackend := NewMockAuthorizationBackend(t)
-			authorizationBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			authorizationBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			authorizationBackend.AuthorizationService = tt.fields.AuthorizationService
 			authorizationBackend.UserService = tt.fields.UserService
 			authorizationBackend.OrganizationService = tt.fields.OrganizationService
@@ -355,7 +357,7 @@ func TestService_handleGetAuthorizations(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleGetAuthorizations() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -399,7 +401,7 @@ func TestService_handleGetAuthorization(t *testing.T) {
 			name: "get a authorization by id",
 			fields: fields{
 				AuthorizationService: &mock.AuthorizationService{
-					FindAuthorizationByIDFn: func(ctx context.Context, id platform.ID) (*platform.Authorization, error) {
+					FindAuthorizationByIDFn: func(ctx context.Context, id platform2.ID) (*platform.Authorization, error) {
 						if id == platformtesting.MustIDBase16("020f755c3c082000") {
 							return &platform.Authorization{
 								ID:     platformtesting.MustIDBase16("020f755c3c082000"),
@@ -411,7 +413,7 @@ func TestService_handleGetAuthorization(t *testing.T) {
 										Resource: platform.Resource{
 											Type:  platform.BucketsResourceType,
 											OrgID: platformtesting.IDPtr(platformtesting.MustIDBase16("020f755c3c083000")),
-											ID: func() *platform.ID {
+											ID: func() *platform2.ID {
 												id := platformtesting.MustIDBase16("020f755c3c084000")
 												return &id
 											}(),
@@ -426,7 +428,7 @@ func TestService_handleGetAuthorization(t *testing.T) {
 					},
 				},
 				UserService: &mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*platform.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform2.ID) (*platform.User, error) {
 						return &platform.User{
 							ID:   id,
 							Name: "u1",
@@ -434,7 +436,7 @@ func TestService_handleGetAuthorization(t *testing.T) {
 					},
 				},
 				OrganizationService: &mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*platform.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform2.ID) (*platform.Organization, error) {
 						return &platform.Organization{
 							ID:   id,
 							Name: "o1",
@@ -442,7 +444,7 @@ func TestService_handleGetAuthorization(t *testing.T) {
 					},
 				},
 				LookupService: &mock.LookupService{
-					NameFn: func(ctx context.Context, resource platform.ResourceType, id platform.ID) (string, error) {
+					NameFn: func(ctx context.Context, resource platform.ResourceType, id platform2.ID) (string, error) {
 						switch resource {
 						case platform.BucketsResourceType:
 							return "b1", nil
@@ -495,9 +497,9 @@ func TestService_handleGetAuthorization(t *testing.T) {
 			name: "not found",
 			fields: fields{
 				AuthorizationService: &mock.AuthorizationService{
-					FindAuthorizationByIDFn: func(ctx context.Context, id platform.ID) (*platform.Authorization, error) {
-						return nil, &platform.Error{
-							Code: platform.ENotFound,
+					FindAuthorizationByIDFn: func(ctx context.Context, id platform2.ID) (*platform.Authorization, error) {
+						return nil, &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "authorization not found",
 						}
 					},
@@ -518,7 +520,7 @@ func TestService_handleGetAuthorization(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			authorizationBackend := NewMockAuthorizationBackend(t)
-			authorizationBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			authorizationBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			authorizationBackend.AuthorizationService = tt.fields.AuthorizationService
 			authorizationBackend.UserService = tt.fields.UserService
 			authorizationBackend.OrganizationService = tt.fields.OrganizationService
@@ -543,7 +545,7 @@ func TestService_handleGetAuthorization(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Logf("headers: %v body: %s", res.Header, body)
@@ -595,7 +597,7 @@ func TestService_handlePostAuthorization(t *testing.T) {
 					},
 				},
 				LookupService: &mock.LookupService{
-					NameFn: func(ctx context.Context, resource platform.ResourceType, id platform.ID) (string, error) {
+					NameFn: func(ctx context.Context, resource platform.ResourceType, id platform2.ID) (string, error) {
 						switch resource {
 						case platform.BucketsResourceType:
 							return "b1", nil
@@ -606,9 +608,9 @@ func TestService_handlePostAuthorization(t *testing.T) {
 					},
 				},
 				UserService: &mock.UserService{
-					FindUserByIDFn: func(ctx context.Context, id platform.ID) (*platform.User, error) {
+					FindUserByIDFn: func(ctx context.Context, id platform2.ID) (*platform.User, error) {
 						if !id.Valid() {
-							return nil, platform.ErrInvalidID
+							return nil, platform2.ErrInvalidID
 						}
 						return &platform.User{
 							ID:   id,
@@ -617,9 +619,9 @@ func TestService_handlePostAuthorization(t *testing.T) {
 					},
 				},
 				OrganizationService: &mock.OrganizationService{
-					FindOrganizationByIDF: func(ctx context.Context, id platform.ID) (*platform.Organization, error) {
+					FindOrganizationByIDF: func(ctx context.Context, id platform2.ID) (*platform.Organization, error) {
 						if !id.Valid() {
-							return nil, platform.ErrInvalidID
+							return nil, platform2.ErrInvalidID
 						}
 						return &platform.Organization{
 							ID:   id,
@@ -698,7 +700,7 @@ func TestService_handlePostAuthorization(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			authorizationBackend := NewMockAuthorizationBackend(t)
-			authorizationBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			authorizationBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			authorizationBackend.AuthorizationService = tt.fields.AuthorizationService
 			authorizationBackend.UserService = tt.fields.UserService
 			authorizationBackend.OrganizationService = tt.fields.OrganizationService
@@ -724,7 +726,7 @@ func TestService_handlePostAuthorization(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Logf("headers: %v body: %s", res.Header, body)
@@ -767,7 +769,7 @@ func TestService_handleDeleteAuthorization(t *testing.T) {
 			name: "remove a authorization by id",
 			fields: fields{
 				&mock.AuthorizationService{
-					DeleteAuthorizationFn: func(ctx context.Context, id platform.ID) error {
+					DeleteAuthorizationFn: func(ctx context.Context, id platform2.ID) error {
 						if id == platformtesting.MustIDBase16("020f755c3c082000") {
 							return nil
 						}
@@ -789,9 +791,9 @@ func TestService_handleDeleteAuthorization(t *testing.T) {
 			name: "authorization not found",
 			fields: fields{
 				&mock.AuthorizationService{
-					DeleteAuthorizationFn: func(ctx context.Context, id platform.ID) error {
-						return &platform.Error{
-							Code: platform.ENotFound,
+					DeleteAuthorizationFn: func(ctx context.Context, id platform2.ID) error {
+						return &errors.Error{
+							Code: errors.ENotFound,
 							Msg:  "authorization not found",
 						}
 					},
@@ -812,7 +814,7 @@ func TestService_handleDeleteAuthorization(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			authorizationBackend := NewMockAuthorizationBackend(t)
-			authorizationBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			authorizationBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			authorizationBackend.AuthorizationService = tt.fields.AuthorizationService
 			authorizationBackend.UserService = tt.fields.UserService
 			authorizationBackend.OrganizationService = tt.fields.OrganizationService
@@ -836,7 +838,7 @@ func TestService_handleDeleteAuthorization(t *testing.T) {
 
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleDeleteAuthorization() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)
@@ -870,7 +872,7 @@ func initAuthorizationService(f platformtesting.AuthorizationFields, t *testing.
 		t.Skip("HTTP authorization service does not required a user id on the authentication struct.  We get the user from the session token.")
 	}
 
-	store := NewTestInmemStore(t)
+	store := platformtesting.NewTestInmemStore(t)
 	tenantStore := tenant.NewStore(store)
 	tenantStore.OrgIDGen = f.OrgIDGenerator
 	tenantService := tenant.NewService(tenantStore)
@@ -911,18 +913,18 @@ func initAuthorizationService(f platformtesting.AuthorizationFields, t *testing.
 	}
 
 	mus := &mock.UserService{
-		FindUserByIDFn: func(ctx context.Context, id platform.ID) (*platform.User, error) {
+		FindUserByIDFn: func(ctx context.Context, id platform2.ID) (*platform.User, error) {
 			return &platform.User{}, nil
 		},
 	}
 
 	authorizationBackend := NewMockAuthorizationBackend(t)
-	authorizationBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+	authorizationBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 	authorizationBackend.AuthorizationService = authService
 	authorizationBackend.UserService = mus
 	authorizationBackend.OrganizationService = tenantService
 	authorizationBackend.LookupService = &mock.LookupService{
-		NameFn: func(ctx context.Context, resource platform.ResourceType, id platform.ID) (string, error) {
+		NameFn: func(ctx context.Context, resource platform.ResourceType, id platform2.ID) (string, error) {
 			switch resource {
 			case platform.BucketsResourceType:
 				return "b1", nil
@@ -934,7 +936,7 @@ func initAuthorizationService(f platformtesting.AuthorizationFields, t *testing.
 	}
 
 	authZ := NewAuthorizationHandler(zaptest.NewLogger(t), authorizationBackend)
-	authN := NewAuthenticationHandler(zaptest.NewLogger(t), kithttp.ErrorHandler(0))
+	authN := NewAuthenticationHandler(zaptest.NewLogger(t), kithttp.NewErrorHandler(zaptest.NewLogger(t)))
 	authN.AuthorizationService = authService
 	authN.Handler = authZ
 	authN.UserService = mus

@@ -8,26 +8,29 @@ import (
 	"github.com/influxdata/flux/execute"
 	"github.com/influxdata/flux/memory"
 	"github.com/influxdata/flux/plan"
-	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/storage/reads/datatypes"
 	"github.com/influxdata/influxdb/v2/tsdb/cursors"
 )
 
 // StorageReader is an interface for reading tables from the storage subsystem.
 type StorageReader interface {
-	ReadFilter(ctx context.Context, spec ReadFilterSpec, alloc *memory.Allocator) (TableIterator, error)
-	ReadGroup(ctx context.Context, spec ReadGroupSpec, alloc *memory.Allocator) (TableIterator, error)
-	ReadWindowAggregate(ctx context.Context, spec ReadWindowAggregateSpec, alloc *memory.Allocator) (TableIterator, error)
+	ReadFilter(ctx context.Context, spec ReadFilterSpec, alloc memory.Allocator) (TableIterator, error)
+	ReadGroup(ctx context.Context, spec ReadGroupSpec, alloc memory.Allocator) (TableIterator, error)
+	ReadWindowAggregate(ctx context.Context, spec ReadWindowAggregateSpec, alloc memory.Allocator) (TableIterator, error)
 
-	ReadTagKeys(ctx context.Context, spec ReadTagKeysSpec, alloc *memory.Allocator) (TableIterator, error)
-	ReadTagValues(ctx context.Context, spec ReadTagValuesSpec, alloc *memory.Allocator) (TableIterator, error)
+	ReadTagKeys(ctx context.Context, spec ReadTagKeysSpec, alloc memory.Allocator) (TableIterator, error)
+	ReadTagValues(ctx context.Context, spec ReadTagValuesSpec, alloc memory.Allocator) (TableIterator, error)
+
+	ReadSeriesCardinality(ctx context.Context, spec ReadSeriesCardinalitySpec, alloc memory.Allocator) (TableIterator, error)
+	SupportReadSeriesCardinality(ctx context.Context) bool
 
 	Close()
 }
 
 type ReadFilterSpec struct {
-	OrganizationID influxdb.ID
-	BucketID       influxdb.ID
+	OrganizationID platform.ID
+	BucketID       platform.ID
 
 	Bounds    execute.Bounds
 	Predicate *datatypes.Predicate
@@ -55,8 +58,14 @@ type ReadTagValuesSpec struct {
 	TagKey string
 }
 
+type ReadSeriesCardinalitySpec struct {
+	ReadFilterSpec
+}
+
+// ReadWindowAggregateSpec defines the options for WindowAggregate.
+//
 // Window and the WindowEvery/Offset should be mutually exclusive. If you set either the WindowEvery or Offset with
-// nanosecond values, then the Window will be ignored
+// nanosecond values, then the Window will be ignored.
 type ReadWindowAggregateSpec struct {
 	ReadFilterSpec
 	WindowEvery int64
@@ -65,6 +74,11 @@ type ReadWindowAggregateSpec struct {
 	CreateEmpty bool
 	TimeColumn  string
 	Window      execute.Window
+
+	// ForceAggregate forces all aggregates to be treated as aggregates.
+	// This forces selectors, which normally don't return values for empty
+	// windows, to return a null value.
+	ForceAggregate bool
 }
 
 func (spec *ReadWindowAggregateSpec) Name() string {

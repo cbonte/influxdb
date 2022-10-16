@@ -5,17 +5,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/influxdata/influxdb/v2/pkg/testing/assert"
-
 	"github.com/google/go-cmp/cmp"
-	"github.com/stretchr/testify/require"
-
-	influxdb "github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/authorization"
 	icontext "github.com/influxdata/influxdb/v2/context"
 	"github.com/influxdata/influxdb/v2/kv"
+	"github.com/influxdata/influxdb/v2/pkg/testing/assert"
 	"github.com/influxdata/influxdb/v2/tenant"
 	influxdbtesting "github.com/influxdata/influxdb/v2/testing"
+	"github.com/stretchr/testify/require"
 )
 
 func TestBoltOnboardingService(t *testing.T) {
@@ -23,15 +21,9 @@ func TestBoltOnboardingService(t *testing.T) {
 }
 
 func initBoltOnboardingService(f influxdbtesting.OnboardingFields, t *testing.T) (influxdb.OnboardingService, func()) {
-	s, closeStore, err := NewTestInmemStore(t)
-	if err != nil {
-		t.Fatalf("failed to create new bolt kv store: %v", err)
-	}
-
+	s := influxdbtesting.NewTestInmemStore(t)
 	svc := initOnboardingService(s, f, t)
-	return svc, func() {
-		closeStore()
-	}
+	return svc, func() {}
 }
 
 func initOnboardingService(s kv.Store, f influxdbtesting.OnboardingFields, t *testing.T) influxdb.OnboardingService {
@@ -60,7 +52,7 @@ func initOnboardingService(s kv.Store, f influxdbtesting.OnboardingFields, t *te
 }
 
 func TestOnboardURM(t *testing.T) {
-	s, _, _ := NewTestInmemStore(t)
+	s := influxdbtesting.NewTestInmemStore(t)
 	storage := tenant.NewStore(s)
 	ten := tenant.NewService(storage)
 
@@ -74,7 +66,7 @@ func TestOnboardURM(t *testing.T) {
 		UserID: 123,
 	})
 
-	onboard, err := svc.OnboardUser(ctx, &influxdb.OnboardingRequest{
+	onboard, err := svc.OnboardInitialUser(ctx, &influxdb.OnboardingRequest{
 		User:   "name",
 		Org:    "name",
 		Bucket: "name",
@@ -98,7 +90,7 @@ func TestOnboardURM(t *testing.T) {
 }
 
 func TestOnboardAuth(t *testing.T) {
-	s, _, _ := NewTestInmemStore(t)
+	s := influxdbtesting.NewTestInmemStore(t)
 	storage := tenant.NewStore(s)
 	ten := tenant.NewService(storage)
 
@@ -112,7 +104,7 @@ func TestOnboardAuth(t *testing.T) {
 		UserID: 123,
 	})
 
-	onboard, err := svc.OnboardUser(ctx, &influxdb.OnboardingRequest{
+	onboard, err := svc.OnboardInitialUser(ctx, &influxdb.OnboardingRequest{
 		User:   "name",
 		Org:    "name",
 		Bucket: "name",
@@ -124,44 +116,50 @@ func TestOnboardAuth(t *testing.T) {
 
 	auth := onboard.Auth
 	expectedPerm := []influxdb.Permission{
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.AuthorizationsResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.AuthorizationsResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.BucketsResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.BucketsResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.DashboardsResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.DashboardsResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{ID: &onboard.Org.ID, Type: influxdb.OrgsResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{ID: &onboard.Org.ID, Type: influxdb.OrgsResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.SourcesResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.SourcesResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.TasksResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.TasksResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.TelegrafsResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.TelegrafsResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.UsersResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.UsersResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.VariablesResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.VariablesResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.ScraperResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.ScraperResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.SecretsResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.SecretsResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.LabelsResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.LabelsResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.ViewsResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.ViewsResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.DocumentsResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.DocumentsResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.NotificationRuleResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.NotificationRuleResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.NotificationEndpointResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.NotificationEndpointResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.ChecksResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.ChecksResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.DBRPResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{OrgID: &onboard.Org.ID, Type: influxdb.DBRPResourceType}},
-		{Action: influxdb.ReadAction, Resource: influxdb.Resource{ID: &onboard.User.ID, Type: influxdb.UsersResourceType}},
-		{Action: influxdb.WriteAction, Resource: influxdb.Resource{ID: &onboard.User.ID, Type: influxdb.UsersResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.AuthorizationsResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.AuthorizationsResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.BucketsResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.BucketsResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.DashboardsResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.DashboardsResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.OrgsResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.OrgsResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.SourcesResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.SourcesResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.TasksResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.TasksResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.TelegrafsResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.TelegrafsResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.UsersResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.UsersResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.VariablesResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.VariablesResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.ScraperResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.ScraperResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.SecretsResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.SecretsResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.LabelsResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.LabelsResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.ViewsResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.ViewsResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.DocumentsResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.DocumentsResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.NotificationRuleResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.NotificationRuleResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.NotificationEndpointResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.NotificationEndpointResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.ChecksResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.ChecksResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.DBRPResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.DBRPResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.NotebooksResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.NotebooksResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.AnnotationsResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.AnnotationsResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.RemotesResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.RemotesResourceType}},
+		{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.ReplicationsResourceType}},
+		{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.ReplicationsResourceType}},
 	}
 	if !cmp.Equal(auth.Permissions, expectedPerm) {
 		t.Fatalf("unequal permissions: \n %+v", cmp.Diff(auth.Permissions, expectedPerm))
@@ -170,7 +168,39 @@ func TestOnboardAuth(t *testing.T) {
 }
 
 func TestOnboardService_RetentionPolicy(t *testing.T) {
-	s, _, _ := NewTestInmemStore(t)
+	s := influxdbtesting.NewTestInmemStore(t)
+	storage := tenant.NewStore(s)
+	ten := tenant.NewService(storage)
+
+	authStore, err := authorization.NewStore(s)
+	require.NoError(t, err)
+
+	authSvc := authorization.NewService(authStore, ten)
+
+	// we will need an auth service as well
+	svc := tenant.NewOnboardService(ten, authSvc)
+
+	ctx := icontext.SetAuthorizer(context.Background(), &influxdb.Authorization{
+		UserID: 123,
+	})
+
+	var retention int64 = 72 * 3600 // 72h
+	onboard, err := svc.OnboardInitialUser(ctx, &influxdb.OnboardingRequest{
+		User:                   "name",
+		Org:                    "name",
+		Bucket:                 "name",
+		RetentionPeriodSeconds: retention,
+	})
+
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	assert.Equal(t, onboard.Bucket.RetentionPeriod, time.Duration(retention)*time.Second, "Retention policy should pass through")
+}
+
+func TestOnboardService_RetentionPolicyDeprecated(t *testing.T) {
+	s := influxdbtesting.NewTestInmemStore(t)
 	storage := tenant.NewStore(s)
 	ten := tenant.NewService(storage)
 
@@ -188,10 +218,10 @@ func TestOnboardService_RetentionPolicy(t *testing.T) {
 
 	retention := 72 * time.Hour
 	onboard, err := svc.OnboardInitialUser(ctx, &influxdb.OnboardingRequest{
-		User:            "name",
-		Org:             "name",
-		Bucket:          "name",
-		RetentionPeriod: retention,
+		User:                      "name",
+		Org:                       "name",
+		Bucket:                    "name",
+		RetentionPeriodDeprecated: retention,
 	})
 
 	if err != nil {
@@ -202,7 +232,7 @@ func TestOnboardService_RetentionPolicy(t *testing.T) {
 }
 
 func TestOnboardService_WeakPassword(t *testing.T) {
-	s, _, _ := NewTestInmemStore(t)
+	s := influxdbtesting.NewTestInmemStore(t)
 	storage := tenant.NewStore(s)
 	ten := tenant.NewService(storage)
 

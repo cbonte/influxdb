@@ -5,6 +5,7 @@ import (
 
 	"github.com/influxdata/influxdb/v2"
 	pcontext "github.com/influxdata/influxdb/v2/context"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 )
 
 // getAuthorization extracts authorization information from a context.Context.
@@ -18,8 +19,8 @@ func getAuthorization(ctx context.Context) (*influxdb.Authorization, error) {
 
 	a, ok := authorizer.(*influxdb.Authorization)
 	if !ok {
-		return nil, &influxdb.Error{
-			Code: influxdb.EForbidden,
+		return nil, &errors.Error{
+			Code: errors.EForbidden,
 			Msg:  "insufficient permissions; session not supported",
 		}
 	}

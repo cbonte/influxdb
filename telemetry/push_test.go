@@ -4,18 +4,18 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/golang/protobuf/proto"
 	"github.com/google/go-cmp/cmp"
 	"github.com/matttproud/golang_protobuf_extensions/pbutil"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestPusher_Push(t *testing.T) {
@@ -114,7 +114,7 @@ func TestPusher_Push(t *testing.T) {
 						return
 					}
 					got.Method = r.Method
-					got.Body, _ = ioutil.ReadAll(r.Body)
+					got.Body, _ = io.ReadAll(r.Body)
 					w.WriteHeader(tt.status)
 				}),
 			)

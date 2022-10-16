@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	platform "github.com/influxdata/influxdb/v2"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
 )
 
 func Test_newSourceResponse(t *testing.T) {
@@ -16,16 +17,16 @@ func Test_newSourceResponse(t *testing.T) {
 		{
 			name: "self source returns links to this instance",
 			s: &platform.Source{
-				ID:             platform.ID(1),
-				OrganizationID: platform.ID(1),
+				ID:             platform2.ID(1),
+				OrganizationID: platform2.ID(1),
 				Name:           "Hi",
 				Type:           platform.SelfSourceType,
 				URL:            "/",
 			},
 			want: &sourceResponse{
 				Source: &platform.Source{
-					ID:             platform.ID(1),
-					OrganizationID: platform.ID(1),
+					ID:             platform2.ID(1),
+					OrganizationID: platform2.ID(1),
 					Name:           "Hi",
 					Type:           platform.SelfSourceType,
 					URL:            "/",
@@ -41,16 +42,16 @@ func Test_newSourceResponse(t *testing.T) {
 		{
 			name: "v1 sources have proxied links",
 			s: &platform.Source{
-				ID:             platform.ID(1),
-				OrganizationID: platform.ID(1),
+				ID:             platform2.ID(1),
+				OrganizationID: platform2.ID(1),
 				Name:           "Hi",
 				Type:           platform.V1SourceType,
 				URL:            "/",
 			},
 			want: &sourceResponse{
 				Source: &platform.Source{
-					ID:             platform.ID(1),
-					OrganizationID: platform.ID(1),
+					ID:             platform2.ID(1),
+					OrganizationID: platform2.ID(1),
 					Name:           "Hi",
 					Type:           platform.V1SourceType,
 					URL:            "/",

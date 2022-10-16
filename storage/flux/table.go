@@ -6,8 +6,8 @@ import (
 	"errors"
 	"sync/atomic"
 
-	"github.com/apache/arrow/go/arrow/array"
 	"github.com/influxdata/flux"
+	"github.com/influxdata/flux/array"
 	"github.com/influxdata/flux/arrow"
 	"github.com/influxdata/flux/execute"
 	"github.com/influxdata/flux/memory"
@@ -33,7 +33,7 @@ type table struct {
 
 	cancelled, used int32
 	cache           *tagsCache
-	alloc           *memory.Allocator
+	alloc           memory.Allocator
 }
 
 func newTable(
@@ -43,7 +43,7 @@ func newTable(
 	cols []flux.ColMeta,
 	defs [][]byte,
 	cache *tagsCache,
-	alloc *memory.Allocator,
+	alloc memory.Allocator,
 ) table {
 	return table{
 		done:   done,
@@ -128,7 +128,7 @@ func (t *table) allocateBuffer(l int) *colReader {
 		t.colBufs = &colReader{
 			key:     t.key,
 			colMeta: t.cols,
-			cols:    make([]array.Interface, len(t.cols)),
+			cols:    make([]array.Array, len(t.cols)),
 		}
 	}
 	t.colBufs.refCount = 1
@@ -141,7 +141,7 @@ type colReader struct {
 
 	key     flux.GroupKey
 	colMeta []flux.ColMeta
-	cols    []array.Interface
+	cols    []array.Array
 	l       int
 }
 
@@ -165,29 +165,29 @@ func (cr *colReader) Bools(j int) *array.Boolean {
 	return cr.cols[j].(*array.Boolean)
 }
 
-func (cr *colReader) Ints(j int) *array.Int64 {
+func (cr *colReader) Ints(j int) *array.Int {
 	execute.CheckColType(cr.colMeta[j], flux.TInt)
-	return cr.cols[j].(*array.Int64)
+	return cr.cols[j].(*array.Int)
 }
 
-func (cr *colReader) UInts(j int) *array.Uint64 {
+func (cr *colReader) UInts(j int) *array.Uint {
 	execute.CheckColType(cr.colMeta[j], flux.TUInt)
-	return cr.cols[j].(*array.Uint64)
+	return cr.cols[j].(*array.Uint)
 }
 
-func (cr *colReader) Floats(j int) *array.Float64 {
+func (cr *colReader) Floats(j int) *array.Float {
 	execute.CheckColType(cr.colMeta[j], flux.TFloat)
-	return cr.cols[j].(*array.Float64)
+	return cr.cols[j].(*array.Float)
 }
 
-func (cr *colReader) Strings(j int) *array.Binary {
+func (cr *colReader) Strings(j int) *array.String {
 	execute.CheckColType(cr.colMeta[j], flux.TString)
-	return cr.cols[j].(*array.Binary)
+	return cr.cols[j].(*array.String)
 }
 
-func (cr *colReader) Times(j int) *array.Int64 {
+func (cr *colReader) Times(j int) *array.Int {
 	execute.CheckColType(cr.colMeta[j], flux.TTime)
-	return cr.cols[j].(*array.Int64)
+	return cr.cols[j].(*array.Int)
 }
 
 // readTags populates b.tags with the provided tags
@@ -203,7 +203,7 @@ func (t *table) readTags(tags models.Tags) {
 	for _, tag := range tags {
 		j := execute.ColIdx(string(tag.Key), t.cols)
 		// In the case of group aggregate, tags that are not referenced in group() are not included in the result, but
-		// readTags () still get a complete tag list. Here is just to skip the tags that should not present in the result.
+		// readTags () still get a complete tag list. Here is just to skip the tags that should not be present in the result.
 		if j < 0 {
 			continue
 		}
@@ -211,14 +211,19 @@ func (t *table) readTags(tags models.Tags) {
 	}
 }
 
-// appendTags fills the colBufs for the tag columns with the tag value.
-func (t *table) appendTags(cr *colReader) {
+// appendTheseTags fills the colBufs for the tag columns with the given tag values.
+func (t *table) appendTheseTags(cr *colReader, tags [][]byte) {
 	for j := range t.cols {
-		v := t.tags[j]
+		v := tags[j]
 		if v != nil {
 			cr.cols[j] = t.cache.GetTag(string(v), cr.l, t.alloc)
 		}
 	}
+}
+
+// appendTags fills the colBufs for the tag columns with the tag values from the table structure.
+func (t *table) appendTags(cr *colReader) {
+	t.appendTheseTags(cr, t.tags)
 }
 
 // appendBounds fills the colBufs for the time bounds
@@ -234,37 +239,37 @@ func (t *table) closeDone() {
 	}
 }
 
-func (t *floatTable) toArrowBuffer(vs []float64) *array.Float64 {
+func (t *floatTable) toArrowBuffer(vs []float64) *array.Float {
 	return arrow.NewFloat(vs, t.alloc)
 }
-func (t *floatGroupTable) toArrowBuffer(vs []float64) *array.Float64 {
+func (t *floatGroupTable) toArrowBuffer(vs []float64) *array.Float {
 	return arrow.NewFloat(vs, t.alloc)
 }
-func (t *floatWindowSelectorTable) toArrowBuffer(vs []float64) *array.Float64 {
+func (t *floatWindowSelectorTable) toArrowBuffer(vs []float64) *array.Float {
 	return arrow.NewFloat(vs, t.alloc)
 }
-func (t *floatWindowTable) mergeValues(intervals []int64) *array.Float64 {
+func (t *floatWindowTable) mergeValues(intervals []int64) *array.Float {
 	b := arrow.NewFloatBuilder(t.alloc)
 	b.Resize(len(intervals))
 	t.appendValues(intervals, b.Append, b.AppendNull)
-	return b.NewFloat64Array()
+	return b.NewFloatArray()
 }
-func (t *floatEmptyWindowSelectorTable) arrowBuilder() *array.Float64Builder {
+func (t *floatEmptyWindowSelectorTable) arrowBuilder() *array.FloatBuilder {
 	return arrow.NewFloatBuilder(t.alloc)
 }
-func (t *floatEmptyWindowSelectorTable) append(builder *array.Float64Builder, v float64) {
+func (t *floatEmptyWindowSelectorTable) append(builder *array.FloatBuilder, v float64) {
 	builder.Append(v)
 }
-func (t *integerTable) toArrowBuffer(vs []int64) *array.Int64 {
+func (t *integerTable) toArrowBuffer(vs []int64) *array.Int {
 	return arrow.NewInt(vs, t.alloc)
 }
-func (t *integerWindowSelectorTable) toArrowBuffer(vs []int64) *array.Int64 {
+func (t *integerWindowSelectorTable) toArrowBuffer(vs []int64) *array.Int {
 	return arrow.NewInt(vs, t.alloc)
 }
-func (t *integerGroupTable) toArrowBuffer(vs []int64) *array.Int64 {
+func (t *integerGroupTable) toArrowBuffer(vs []int64) *array.Int {
 	return arrow.NewInt(vs, t.alloc)
 }
-func (t *integerWindowTable) mergeValues(intervals []int64) *array.Int64 {
+func (t *integerWindowTable) mergeValues(intervals []int64) *array.Int {
 	b := arrow.NewIntBuilder(t.alloc)
 	b.Resize(len(intervals))
 	appendNull := b.AppendNull
@@ -272,55 +277,55 @@ func (t *integerWindowTable) mergeValues(intervals []int64) *array.Int64 {
 		appendNull = func() { b.Append(*t.fillValue) }
 	}
 	t.appendValues(intervals, b.Append, appendNull)
-	return b.NewInt64Array()
+	return b.NewIntArray()
 }
-func (t *integerEmptyWindowSelectorTable) arrowBuilder() *array.Int64Builder {
+func (t *integerEmptyWindowSelectorTable) arrowBuilder() *array.IntBuilder {
 	return arrow.NewIntBuilder(t.alloc)
 }
-func (t *integerEmptyWindowSelectorTable) append(builder *array.Int64Builder, v int64) {
+func (t *integerEmptyWindowSelectorTable) append(builder *array.IntBuilder, v int64) {
 	builder.Append(v)
 }
-func (t *unsignedTable) toArrowBuffer(vs []uint64) *array.Uint64 {
+func (t *unsignedTable) toArrowBuffer(vs []uint64) *array.Uint {
 	return arrow.NewUint(vs, t.alloc)
 }
-func (t *unsignedGroupTable) toArrowBuffer(vs []uint64) *array.Uint64 {
+func (t *unsignedGroupTable) toArrowBuffer(vs []uint64) *array.Uint {
 	return arrow.NewUint(vs, t.alloc)
 }
-func (t *unsignedWindowSelectorTable) toArrowBuffer(vs []uint64) *array.Uint64 {
+func (t *unsignedWindowSelectorTable) toArrowBuffer(vs []uint64) *array.Uint {
 	return arrow.NewUint(vs, t.alloc)
 }
-func (t *unsignedWindowTable) mergeValues(intervals []int64) *array.Uint64 {
+func (t *unsignedWindowTable) mergeValues(intervals []int64) *array.Uint {
 	b := arrow.NewUintBuilder(t.alloc)
 	b.Resize(len(intervals))
 	t.appendValues(intervals, b.Append, b.AppendNull)
-	return b.NewUint64Array()
+	return b.NewUintArray()
 }
-func (t *unsignedEmptyWindowSelectorTable) arrowBuilder() *array.Uint64Builder {
+func (t *unsignedEmptyWindowSelectorTable) arrowBuilder() *array.UintBuilder {
 	return arrow.NewUintBuilder(t.alloc)
 }
-func (t *unsignedEmptyWindowSelectorTable) append(builder *array.Uint64Builder, v uint64) {
+func (t *unsignedEmptyWindowSelectorTable) append(builder *array.UintBuilder, v uint64) {
 	builder.Append(v)
 }
-func (t *stringTable) toArrowBuffer(vs []string) *array.Binary {
+func (t *stringTable) toArrowBuffer(vs []string) *array.String {
 	return arrow.NewString(vs, t.alloc)
 }
-func (t *stringGroupTable) toArrowBuffer(vs []string) *array.Binary {
+func (t *stringGroupTable) toArrowBuffer(vs []string) *array.String {
 	return arrow.NewString(vs, t.alloc)
 }
-func (t *stringWindowSelectorTable) toArrowBuffer(vs []string) *array.Binary {
+func (t *stringWindowSelectorTable) toArrowBuffer(vs []string) *array.String {
 	return arrow.NewString(vs, t.alloc)
 }
-func (t *stringWindowTable) mergeValues(intervals []int64) *array.Binary {
+func (t *stringWindowTable) mergeValues(intervals []int64) *array.String {
 	b := arrow.NewStringBuilder(t.alloc)
 	b.Resize(len(intervals))
-	t.appendValues(intervals, b.AppendString, b.AppendNull)
-	return b.NewBinaryArray()
+	t.appendValues(intervals, b.Append, b.AppendNull)
+	return b.NewStringArray()
 }
-func (t *stringEmptyWindowSelectorTable) arrowBuilder() *array.BinaryBuilder {
+func (t *stringEmptyWindowSelectorTable) arrowBuilder() *array.StringBuilder {
 	return arrow.NewStringBuilder(t.alloc)
 }
-func (t *stringEmptyWindowSelectorTable) append(builder *array.BinaryBuilder, v string) {
-	builder.AppendString(v)
+func (t *stringEmptyWindowSelectorTable) append(builder *array.StringBuilder, v string) {
+	builder.Append(v)
 }
 func (t *booleanTable) toArrowBuffer(vs []bool) *array.Boolean {
 	return arrow.NewBool(vs, t.alloc)

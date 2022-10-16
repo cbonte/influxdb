@@ -7,13 +7,17 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"github.com/influxdata/flux/ast"
+	"github.com/influxdata/flux/ast/astutil"
 	"github.com/influxdata/flux/parser"
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/mock"
 	"github.com/influxdata/influxdb/v2/notification"
 	"github.com/influxdata/influxdb/v2/notification/check"
 	"github.com/influxdata/influxdb/v2/query/fluxlang"
 	influxTesting "github.com/influxdata/influxdb/v2/testing"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -44,8 +48,8 @@ func TestValidCheck(t *testing.T) {
 		{
 			name: "invalid check id",
 			src:  &check.Deadman{},
-			err: &influxdb.Error{
-				Code: influxdb.EInvalid,
+			err: &errors.Error{
+				Code: errors.EInvalid,
 				Msg:  "Check ID is invalid",
 			},
 		},
@@ -56,22 +60,9 @@ func TestValidCheck(t *testing.T) {
 					ID: influxTesting.MustIDBase16(id1),
 				},
 			},
-			err: &influxdb.Error{
-				Code: influxdb.EInvalid,
+			err: &errors.Error{
+				Code: errors.EInvalid,
 				Msg:  "Check Name can't be empty",
-			},
-		},
-		{
-			name: "invalid owner id",
-			src: &check.Threshold{
-				Base: check.Base{
-					ID:   influxTesting.MustIDBase16(id1),
-					Name: "name1",
-				},
-			},
-			err: &influxdb.Error{
-				Code: influxdb.EInvalid,
-				Msg:  "Check OwnerID is invalid",
 			},
 		},
 		{
@@ -83,8 +74,8 @@ func TestValidCheck(t *testing.T) {
 					OwnerID: influxTesting.MustIDBase16(id2),
 				},
 			},
-			err: &influxdb.Error{
-				Code: influxdb.EInvalid,
+			err: &errors.Error{
+				Code: errors.EInvalid,
 				Msg:  "Check OrgID is invalid",
 			},
 		},
@@ -100,8 +91,8 @@ func TestValidCheck(t *testing.T) {
 					Tags:                  []influxdb.Tag{{Key: "key1"}},
 				},
 			},
-			err: &influxdb.Error{
-				Code: influxdb.EInvalid,
+			err: &errors.Error{
+				Code: errors.EInvalid,
 				Msg:  "Check Every must exist",
 			},
 		},
@@ -117,8 +108,8 @@ func TestValidCheck(t *testing.T) {
 					Offset:  mustDuration("2m"),
 				},
 			},
-			err: &influxdb.Error{
-				Code: influxdb.EInvalid,
+			err: &errors.Error{
+				Code: errors.EInvalid,
 				Msg:  "Offset should not be equal or greater than the interval",
 			},
 		},
@@ -135,8 +126,8 @@ func TestValidCheck(t *testing.T) {
 					Tags:                  []influxdb.Tag{{Key: "key1"}},
 				},
 			},
-			err: &influxdb.Error{
-				Code: influxdb.EInvalid,
+			err: &errors.Error{
+				Code: errors.EInvalid,
 				Msg:  "tag must contain a key and a value",
 			},
 		},
@@ -148,8 +139,8 @@ func TestValidCheck(t *testing.T) {
 					&check.Range{Min: 200, Max: 100},
 				},
 			},
-			err: &influxdb.Error{
-				Code: influxdb.EInvalid,
+			err: &errors.Error{
+				Code: errors.EInvalid,
 				Msg:  "range threshold min can't be larger than max",
 			},
 		},
@@ -280,4 +271,13 @@ func TestJSON(t *testing.T) {
 		}
 		t.Run(c.name, fn)
 	}
+}
+
+func mustFormatPackage(t *testing.T, pkg *ast.Package) string {
+	if len(pkg.Files) == 0 {
+		t.Fatal("package expected to have at least one file")
+	}
+	v, err := astutil.Format(pkg.Files[0])
+	require.NoError(t, err)
+	return v
 }

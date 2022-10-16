@@ -3,8 +3,8 @@ package legacy
 import (
 	"context"
 
-	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/http/metric"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 )
 
@@ -20,7 +20,7 @@ type writeUsageRecorder struct {
 	EventRecorder metric.EventRecorder
 }
 
-func (w *writeUsageRecorder) Record(ctx context.Context, requestBytes int, orgID influxdb.ID, endpoint string) {
+func (w *writeUsageRecorder) Record(ctx context.Context, requestBytes int, orgID platform.ID, endpoint string) {
 	w.EventRecorder.Record(ctx, metric.Event{
 		OrgID:         orgID,
 		Endpoint:      endpoint,

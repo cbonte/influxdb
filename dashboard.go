@@ -7,6 +7,9 @@ import (
 	"net/url"
 	"sort"
 	"time"
+
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 )
 
 // ErrDashboardNotFound is the error msg for a missing dashboard.
@@ -36,7 +39,7 @@ const (
 // DashboardService represents a service for managing dashboard data.
 type DashboardService interface {
 	// FindDashboardByID returns a single dashboard by ID.
-	FindDashboardByID(ctx context.Context, id ID) (*Dashboard, error)
+	FindDashboardByID(ctx context.Context, id platform.ID) (*Dashboard, error)
 
 	// FindDashboards returns a list of dashboards that match filter and the total count of matching dashboards.
 	// Additional options provide pagination & sorting.
@@ -47,39 +50,39 @@ type DashboardService interface {
 
 	// UpdateDashboard updates a single dashboard with changeset.
 	// Returns the new dashboard state after update.
-	UpdateDashboard(ctx context.Context, id ID, upd DashboardUpdate) (*Dashboard, error)
+	UpdateDashboard(ctx context.Context, id platform.ID, upd DashboardUpdate) (*Dashboard, error)
 
 	// AddDashboardCell adds a cell to a dashboard.
-	AddDashboardCell(ctx context.Context, id ID, c *Cell, opts AddDashboardCellOptions) error
+	AddDashboardCell(ctx context.Context, id platform.ID, c *Cell, opts AddDashboardCellOptions) error
 
 	// RemoveDashboardCell removes a dashboard.
-	RemoveDashboardCell(ctx context.Context, dashboardID, cellID ID) error
+	RemoveDashboardCell(ctx context.Context, dashboardID, cellID platform.ID) error
 
 	// UpdateDashboardCell replaces the dashboard cell with the provided ID.
-	UpdateDashboardCell(ctx context.Context, dashboardID, cellID ID, upd CellUpdate) (*Cell, error)
+	UpdateDashboardCell(ctx context.Context, dashboardID, cellID platform.ID, upd CellUpdate) (*Cell, error)
 
 	// GetDashboardCellView retrieves a dashboard cells view.
-	GetDashboardCellView(ctx context.Context, dashboardID, cellID ID) (*View, error)
+	GetDashboardCellView(ctx context.Context, dashboardID, cellID platform.ID) (*View, error)
 
 	// UpdateDashboardCellView retrieves a dashboard cells view.
-	UpdateDashboardCellView(ctx context.Context, dashboardID, cellID ID, upd ViewUpdate) (*View, error)
+	UpdateDashboardCellView(ctx context.Context, dashboardID, cellID platform.ID, upd ViewUpdate) (*View, error)
 
 	// DeleteDashboard removes a dashboard by ID.
-	DeleteDashboard(ctx context.Context, id ID) error
+	DeleteDashboard(ctx context.Context, id platform.ID) error
 
 	// ReplaceDashboardCells replaces all cells in a dashboard
-	ReplaceDashboardCells(ctx context.Context, id ID, c []*Cell) error
+	ReplaceDashboardCells(ctx context.Context, id platform.ID, c []*Cell) error
 }
 
 // Dashboard represents all visual and query data for a dashboard.
 type Dashboard struct {
-	ID             ID            `json:"id,omitempty"`
-	OrganizationID ID            `json:"orgID,omitempty"`
+	ID             platform.ID   `json:"id,omitempty"`
+	OrganizationID platform.ID   `json:"orgID,omitempty"`
 	Name           string        `json:"name"`
 	Description    string        `json:"description"`
 	Cells          []*Cell       `json:"cells"`
 	Meta           DashboardMeta `json:"meta"`
-	OwnerID        *ID           `json:"owner,omitempty"`
+	OwnerID        *platform.ID  `json:"owner,omitempty"`
 }
 
 // DashboardMeta contains meta information about dashboards
@@ -123,7 +126,7 @@ func SortDashboards(opts FindOptions, ds []*Dashboard) {
 
 // Cell holds positional information about a cell on dashboard and a reference to a cell.
 type Cell struct {
-	ID ID `json:"id,omitempty"`
+	ID platform.ID `json:"id,omitempty"`
 	CellProperty
 	View *View `json:"-"`
 }
@@ -131,7 +134,7 @@ type Cell struct {
 // Marshals the cell
 func (c *Cell) MarshalJSON() ([]byte, error) {
 	type resp struct {
-		ID             *ID             `json:"id,omitempty"`
+		ID             *platform.ID    `json:"id,omitempty"`
 		Name           string          `json:"name,omitempty"`
 		ViewProperties json.RawMessage `json:"properties,omitempty"`
 		CellProperty
@@ -155,7 +158,7 @@ func (c *Cell) MarshalJSON() ([]byte, error) {
 
 func (c *Cell) UnmarshalJSON(b []byte) error {
 	var newCell struct {
-		ID             ID              `json:"id,omitempty"`
+		ID             platform.ID     `json:"id,omitempty"`
 		Name           string          `json:"name,omitempty"`
 		ViewProperties json.RawMessage `json:"properties,omitempty"`
 		CellProperty
@@ -195,10 +198,10 @@ type CellProperty struct {
 
 // DashboardFilter is a filter for dashboards.
 type DashboardFilter struct {
-	IDs            []*ID
-	OrganizationID *ID
+	IDs            []*platform.ID
+	OrganizationID *platform.ID
 	Organization   *string
-	OwnerID        *ID
+	OwnerID        *platform.ID
 }
 
 // QueryParams turns a dashboard filter into query params
@@ -252,10 +255,10 @@ func (u DashboardUpdate) Apply(d *Dashboard) error {
 }
 
 // Valid returns an error if the dashboard update is invalid.
-func (u DashboardUpdate) Valid() *Error {
+func (u DashboardUpdate) Valid() *errors.Error {
 	if u.Name == nil && u.Description == nil {
-		return &Error{
-			Code: EInvalid,
+		return &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "must update at least one attribute",
 		}
 	}
@@ -298,10 +301,10 @@ func (u CellUpdate) Apply(c *Cell) error {
 }
 
 // Valid returns an error if the cell update is invalid.
-func (u CellUpdate) Valid() *Error {
+func (u CellUpdate) Valid() *errors.Error {
 	if u.H == nil && u.W == nil && u.Y == nil && u.X == nil {
-		return &Error{
-			Code: EInvalid,
+		return &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "must update at least one attribute",
 		}
 	}
@@ -316,11 +319,11 @@ type ViewUpdate struct {
 }
 
 // Valid validates the update struct. It expects minimal values to be set.
-func (u ViewUpdate) Valid() *Error {
+func (u ViewUpdate) Valid() *errors.Error {
 	_, ok := u.Properties.(EmptyViewProperties)
 	if u.Name == nil && ok {
-		return &Error{
-			Code: EInvalid,
+		return &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "expected at least one attribute to be updated",
 		}
 	}
@@ -352,7 +355,7 @@ type ViewContentsUpdate struct {
 
 // ViewFilter represents a set of filter that restrict the returned results.
 type ViewFilter struct {
-	ID    *ID
+	ID    *platform.ID
 	Types []string
 }
 
@@ -364,8 +367,8 @@ type View struct {
 
 // ViewContents is the id and name of a specific view.
 type ViewContents struct {
-	ID   ID     `json:"id,omitempty"`
-	Name string `json:"name"`
+	ID   platform.ID `json:"id,omitempty"`
+	Name string      `json:"name"`
 }
 
 // Values for all supported view property types.
@@ -383,6 +386,7 @@ const (
 	ViewPropertyTypeXY                 = "xy"
 	ViewPropertyTypeMosaic             = "mosaic"
 	ViewPropertyTypeBand               = "band"
+	ViewPropertyTypeGeo                = "geo"
 )
 
 // ViewProperties is used to mark other structures as conforming to a View.
@@ -450,6 +454,12 @@ func UnmarshalViewPropertiesJSON(b []byte) (ViewProperties, error) {
 				return nil, err
 			}
 			vis = gv
+		case ViewPropertyTypeGeo:
+			var gvw GeoViewProperties
+			if err := json.Unmarshal(v.B, &gvw); err != nil {
+				return nil, err
+			}
+			vis = gvw
 		case ViewPropertyTypeTable:
 			var tv TableViewProperties
 			if err := json.Unmarshal(v.B, &tv); err != nil {
@@ -548,6 +558,14 @@ func MarshalViewPropertiesJSON(v ViewProperties) ([]byte, error) {
 			Shape: "chronograf-v2",
 
 			GaugeViewProperties: vis,
+		}
+	case GeoViewProperties:
+		s = struct {
+			Shape string `json:"shape"`
+			GeoViewProperties
+		}{
+			Shape:             "chronograf-v2",
+			GeoViewProperties: vis,
 		}
 	case XYViewProperties:
 		s = struct {
@@ -715,7 +733,7 @@ type LinePlusSingleStatProperties struct {
 	Queries                    []DashboardQuery `json:"queries"`
 	Axes                       map[string]Axis  `json:"axes"`
 	Type                       string           `json:"type"`
-	Legend                     Legend           `json:"legend"`
+	StaticLegend               StaticLegend     `json:"staticLegend"`
 	ViewColors                 []ViewColor      `json:"colors"`
 	Prefix                     string           `json:"prefix"`
 	Suffix                     string           `json:"suffix"`
@@ -737,6 +755,7 @@ type LinePlusSingleStatProperties struct {
 	TimeFormat                 string           `json:"timeFormat"`
 	HoverDimension             string           `json:"hoverDimension"`
 	LegendColorizeRows         bool             `json:"legendColorizeRows"`
+	LegendHide                 bool             `json:"legendHide"`
 	LegendOpacity              float64          `json:"legendOpacity"`
 	LegendOrientationThreshold int              `json:"legendOrientationThreshold"`
 }
@@ -746,7 +765,7 @@ type XYViewProperties struct {
 	Queries                    []DashboardQuery `json:"queries"`
 	Axes                       map[string]Axis  `json:"axes"`
 	Type                       string           `json:"type"`
-	Legend                     Legend           `json:"legend"`
+	StaticLegend               StaticLegend     `json:"staticLegend"`
 	Geom                       string           `json:"geom"` // Either "line", "step", "stacked", or "bar"
 	ViewColors                 []ViewColor      `json:"colors"`
 	Note                       string           `json:"note"`
@@ -766,6 +785,7 @@ type XYViewProperties struct {
 	TimeFormat                 string           `json:"timeFormat"`
 	HoverDimension             string           `json:"hoverDimension"`
 	LegendColorizeRows         bool             `json:"legendColorizeRows"`
+	LegendHide                 bool             `json:"legendHide"`
 	LegendOpacity              float64          `json:"legendOpacity"`
 	LegendOrientationThreshold int              `json:"legendOrientationThreshold"`
 }
@@ -775,7 +795,7 @@ type BandViewProperties struct {
 	Queries                    []DashboardQuery `json:"queries"`
 	Axes                       map[string]Axis  `json:"axes"`
 	Type                       string           `json:"type"`
-	Legend                     Legend           `json:"legend"`
+	StaticLegend               StaticLegend     `json:"staticLegend"`
 	Geom                       string           `json:"geom"`
 	ViewColors                 []ViewColor      `json:"colors"`
 	Note                       string           `json:"note"`
@@ -796,6 +816,7 @@ type BandViewProperties struct {
 	MainColumn                 string           `json:"mainColumn"`
 	LowerColumn                string           `json:"lowerColumn"`
 	LegendColorizeRows         bool             `json:"legendColorizeRows"`
+	LegendHide                 bool             `json:"legendHide"`
 	LegendOpacity              float64          `json:"legendOpacity"`
 	LegendOrientationThreshold int              `json:"legendOrientationThreshold"`
 }
@@ -807,6 +828,7 @@ type CheckViewProperties struct {
 	Queries                    []DashboardQuery `json:"queries"`
 	ViewColors                 []string         `json:"colors"`
 	LegendColorizeRows         bool             `json:"legendColorizeRows"`
+	LegendHide                 bool             `json:"legendHide"`
 	LegendOpacity              float64          `json:"legendOpacity"`
 	LegendOrientationThreshold int              `json:"legendOrientationThreshold"`
 }
@@ -839,6 +861,7 @@ type HistogramViewProperties struct {
 	Note                       string           `json:"note"`
 	ShowNoteWhenEmpty          bool             `json:"showNoteWhenEmpty"`
 	LegendColorizeRows         bool             `json:"legendColorizeRows"`
+	LegendHide                 bool             `json:"legendHide"`
 	LegendOpacity              float64          `json:"legendOpacity"`
 	LegendOrientationThreshold int              `json:"legendOrientationThreshold"`
 }
@@ -871,6 +894,7 @@ type HeatmapViewProperties struct {
 	ShowNoteWhenEmpty          bool             `json:"showNoteWhenEmpty"`
 	TimeFormat                 string           `json:"timeFormat"`
 	LegendColorizeRows         bool             `json:"legendColorizeRows"`
+	LegendHide                 bool             `json:"legendHide"`
 	LegendOpacity              float64          `json:"legendOpacity"`
 	LegendOrientationThreshold int              `json:"legendOrientationThreshold"`
 }
@@ -904,6 +928,7 @@ type ScatterViewProperties struct {
 	ShowNoteWhenEmpty          bool             `json:"showNoteWhenEmpty"`
 	TimeFormat                 string           `json:"timeFormat"`
 	LegendColorizeRows         bool             `json:"legendColorizeRows"`
+	LegendHide                 bool             `json:"legendHide"`
 	LegendOpacity              float64          `json:"legendOpacity"`
 	LegendOrientationThreshold int              `json:"legendOrientationThreshold"`
 }
@@ -919,6 +944,8 @@ type MosaicViewProperties struct {
 	XTotalTicks                int              `json:"xTotalTicks"`
 	XTickStart                 float64          `json:"xTickStart"`
 	XTickStep                  float64          `json:"xTickStep"`
+	YLabelColumnSeparator      string           `json:"yLabelColumnSeparator"`
+	YLabelColumns              []string         `json:"yLabelColumns"`
 	YSeriesColumns             []string         `json:"ySeriesColumns"`
 	XDomain                    []float64        `json:"xDomain,omitempty"`
 	YDomain                    []float64        `json:"yDomain,omitempty"`
@@ -931,7 +958,9 @@ type MosaicViewProperties struct {
 	Note                       string           `json:"note"`
 	ShowNoteWhenEmpty          bool             `json:"showNoteWhenEmpty"`
 	TimeFormat                 string           `json:"timeFormat"`
+	HoverDimension             string           `json:"hoverDimension"`
 	LegendColorizeRows         bool             `json:"legendColorizeRows"`
+	LegendHide                 bool             `json:"legendHide"`
 	LegendOpacity              float64          `json:"legendOpacity"`
 	LegendOrientationThreshold int              `json:"legendOrientationThreshold"`
 }
@@ -948,6 +977,49 @@ type GaugeViewProperties struct {
 	DecimalPlaces     DecimalPlaces    `json:"decimalPlaces"`
 	Note              string           `json:"note"`
 	ShowNoteWhenEmpty bool             `json:"showNoteWhenEmpty"`
+}
+
+// Geographical coordinates
+type Datum struct {
+	Lat float64 `json:"lat"`
+	Lon float64 `json:"lon"`
+}
+
+// Single visualization layer properties of a chronograf map widget
+type GeoLayer struct {
+	Type           string `json:"type"`
+	RadiusField    string `json:"radiusField"`
+	ColorField     string `json:"colorField"`
+	IntensityField string `json:"intensityField"`
+	// circle layer properties
+	ViewColors         []ViewColor `json:"colors"`
+	Radius             int32       `json:"radius"`
+	Blur               int32       `json:"blur"`
+	RadiusDimension    Axis        `json:"radiusDimension,omitempty"`
+	ColorDimension     Axis        `json:"colorDimension,omitempty"`
+	IntensityDimension Axis        `json:"intensityDimension,omitempty"`
+	InterpolateColors  bool        `json:"interpolateColors"`
+	// track layer properties
+	TrackWidth   int32 `json:"trackWidth"`
+	Speed        int32 `json:"speed"`
+	RandomColors bool  `json:"randomColors"`
+	// point layer properties
+	IsClustered bool `json:"isClustered"`
+}
+
+// GeoViewProperties represents options for map view in Chronograf
+type GeoViewProperties struct {
+	Type                   string           `json:"type"`
+	Queries                []DashboardQuery `json:"queries"`
+	Center                 Datum            `json:"center"`
+	Zoom                   float64          `json:"zoom"`
+	MapStyle               string           `json:"mapStyle"`
+	AllowPanAndZoom        bool             `json:"allowPanAndZoom"`
+	DetectCoordinateFields bool             `json:"detectCoordinateFields"`
+	ViewColor              []ViewColor      `json:"colors"`
+	GeoLayers              []GeoLayer       `json:"layers"`
+	Note                   string           `json:"note"`
+	ShowNoteWhenEmpty      bool             `json:"showNoteWhenEmpty"`
 }
 
 // TableViewProperties represents options for table view in Chronograf
@@ -997,6 +1069,7 @@ func (HeatmapViewProperties) viewProperties()        {}
 func (ScatterViewProperties) viewProperties()        {}
 func (MosaicViewProperties) viewProperties()         {}
 func (GaugeViewProperties) viewProperties()          {}
+func (GeoViewProperties) viewProperties()            {}
 func (TableViewProperties) viewProperties()          {}
 func (MarkdownViewProperties) viewProperties()       {}
 func (LogViewProperties) viewProperties()            {}
@@ -1011,6 +1084,7 @@ func (v HeatmapViewProperties) GetType() string        { return v.Type }
 func (v ScatterViewProperties) GetType() string        { return v.Type }
 func (v MosaicViewProperties) GetType() string         { return v.Type }
 func (v GaugeViewProperties) GetType() string          { return v.Type }
+func (v GeoViewProperties) GetType() string            { return v.Type }
 func (v TableViewProperties) GetType() string          { return v.Type }
 func (v MarkdownViewProperties) GetType() string       { return v.Type }
 func (v LogViewProperties) GetType() string            { return v.Type }
@@ -1108,10 +1182,15 @@ type ViewColor struct {
 	Value float64 `json:"value"` // Value is the data value mapped to this color
 }
 
-// Legend represents the encoding of data into a legend
-type Legend struct {
-	Type        string `json:"type,omitempty"`
-	Orientation string `json:"orientation,omitempty"`
+// StaticLegend represents the options specific to the static legend
+type StaticLegend struct {
+	ColorizeRows         bool    `json:"colorizeRows,omitempty"`
+	HeightRatio          float64 `json:"heightRatio,omitempty"`
+	Show                 bool    `json:"show,omitempty"`
+	Opacity              float64 `json:"opacity,omitempty"`
+	OrientationThreshold int     `json:"orientationThreshold,omitempty"`
+	ValueAxis            string  `json:"valueAxis,omitempty"`
+	WidthRatio           float64 `json:"widthRatio,omitempty"`
 }
 
 // TableOptions is a type of options for a DashboardView with type Table

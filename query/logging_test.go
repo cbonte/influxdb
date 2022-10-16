@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"io/ioutil"
 	"testing"
 	"time"
 
@@ -12,7 +11,7 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/influxdata/flux"
 	"github.com/influxdata/flux/metadata"
-	platform "github.com/influxdata/influxdb/v2"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/query"
 	"github.com/influxdata/influxdb/v2/query/mock"
 	"github.com/opentracing/opentracing-go"
@@ -23,8 +22,8 @@ import (
 var orgID = MustIDBase16("ba55ba55ba55ba55")
 
 // MustIDBase16 is an helper to ensure a correct ID is built during testing.
-func MustIDBase16(s string) platform.ID {
-	id, err := platform.IDFromString(s)
+func MustIDBase16(s string) platform2.ID {
+	id, err := platform2.IDFromString(s)
 	if err != nil {
 		panic(err)
 	}
@@ -130,7 +129,7 @@ func TestLoggingProxyQueryService(t *testing.T) {
 		})
 
 		lpqs := query.NewLoggingProxyQueryService(zap.NewNop(), logger, pqs, condLog)
-		_, err := lpqs.Query(context.Background(), ioutil.Discard, req)
+		_, err := lpqs.Query(context.Background(), io.Discard, req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -140,7 +139,7 @@ func TestLoggingProxyQueryService(t *testing.T) {
 		}
 
 		ctx := context.WithValue(context.Background(), loggingCtxKey, true)
-		_, err = lpqs.Query(ctx, ioutil.Discard, req)
+		_, err = lpqs.Query(ctx, io.Discard, req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -158,7 +157,7 @@ func TestLoggingProxyQueryService(t *testing.T) {
 		reqMeta1 := query.RequireMetadataKey("this-metadata-wont-be-found")
 		lpqs1 := query.NewLoggingProxyQueryService(zap.NewNop(), logger, pqs, reqMeta1)
 
-		_, err := lpqs1.Query(context.Background(), ioutil.Discard, req)
+		_, err := lpqs1.Query(context.Background(), io.Discard, req)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -170,7 +169,7 @@ func TestLoggingProxyQueryService(t *testing.T) {
 		reqMeta2 := query.RequireMetadataKey("some-mock-metadata")
 		lpqs2 := query.NewLoggingProxyQueryService(zap.NewNop(), logger, pqs, reqMeta2)
 
-		_, err = lpqs2.Query(context.Background(), ioutil.Discard, req)
+		_, err = lpqs2.Query(context.Background(), io.Discard, req)
 		if err != nil {
 			t.Fatal(err)
 		}

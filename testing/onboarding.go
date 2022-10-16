@@ -7,6 +7,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	platform "github.com/influxdata/influxdb/v2"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/mock"
 )
 
@@ -29,7 +31,7 @@ var onboardCmpOptions = cmp.Options{
 // OnboardingFields will include the IDGenerator, TokenGenerator
 // and IsOnboarding
 type OnboardingFields struct {
-	IDGenerator    platform.IDGenerator
+	IDGenerator    platform2.IDGenerator
 	TokenGenerator platform.TokenGenerator
 	TimeGenerator  platform.TimeGenerator
 	IsOnboarding   bool
@@ -63,7 +65,7 @@ func OnboardInitialUser(
 				IsOnboarding:   false,
 			},
 			wants: wants{
-				errCode: platform.EConflict,
+				errCode: errors.EConflict,
 			},
 		},
 		{
@@ -82,7 +84,7 @@ func OnboardInitialUser(
 				},
 			},
 			wants: wants{
-				errCode: platform.EEmptyValue,
+				errCode: errors.EUnprocessableEntity,
 			},
 		},
 		{
@@ -101,7 +103,7 @@ func OnboardInitialUser(
 				},
 			},
 			wants: wants{
-				errCode: platform.EEmptyValue,
+				errCode: errors.EUnprocessableEntity,
 			},
 		},
 		{
@@ -120,26 +122,7 @@ func OnboardInitialUser(
 				},
 			},
 			wants: wants{
-				errCode: platform.EEmptyValue,
-			},
-		},
-		{
-			name: "missing password should fail",
-			fields: OnboardingFields{
-				IDGenerator: &loopIDGenerator{
-					s: []string{oneID, twoID, threeID, fourID},
-				},
-				TokenGenerator: mock.NewTokenGenerator(oneToken, nil),
-				IsOnboarding:   true,
-			},
-			args: args{
-				request: &platform.OnboardingRequest{
-					User: "admin",
-					Org:  "org1",
-				},
-			},
-			wants: wants{
-				errCode: platform.EEmptyValue,
+				errCode: errors.EUnprocessableEntity,
 			},
 		},
 		{
@@ -154,11 +137,11 @@ func OnboardInitialUser(
 			},
 			args: args{
 				request: &platform.OnboardingRequest{
-					User:            "admin",
-					Org:             "org1",
-					Bucket:          "bucket1",
-					Password:        "password1",
-					RetentionPeriod: time.Hour * 24 * 7, // 1 week
+					User:                   "admin",
+					Org:                    "org1",
+					Bucket:                 "bucket1",
+					Password:               "password1",
+					RetentionPeriodSeconds: 3600 * 24 * 7, // 1 week
 				},
 			},
 			wants: wants{
@@ -214,7 +197,7 @@ func OnboardInitialUser(
 				t.Fatalf("expected error code '%s' got '%v'", tt.wants.errCode, err)
 			}
 			if err != nil && tt.wants.errCode != "" {
-				if code := platform.ErrorCode(err); code != tt.wants.errCode {
+				if code := errors.ErrorCode(err); code != tt.wants.errCode {
 					t.Logf("Error: %v", err)
 					t.Fatalf("expected error code to match '%s' got '%v'", tt.wants.errCode, code)
 				}
@@ -242,7 +225,7 @@ type loopIDGenerator struct {
 	p int
 }
 
-func (g *loopIDGenerator) ID() platform.ID {
+func (g *loopIDGenerator) ID() platform2.ID {
 	if g.p == len(g.s) {
 		g.p = 0
 	}

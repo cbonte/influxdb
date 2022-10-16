@@ -3,10 +3,10 @@ package reads
 import (
 	"context"
 
-	"github.com/gogo/protobuf/proto"
 	"github.com/influxdata/influxdb/v2/models"
 	"github.com/influxdata/influxdb/v2/storage/reads/datatypes"
 	"github.com/influxdata/influxdb/v2/tsdb/cursors"
+	"google.golang.org/protobuf/proto"
 )
 
 type ResultSet interface {
@@ -83,6 +83,9 @@ type Store interface {
 
 	TagKeys(ctx context.Context, req *datatypes.TagKeysRequest) (cursors.StringIterator, error)
 	TagValues(ctx context.Context, req *datatypes.TagValuesRequest) (cursors.StringIterator, error)
+
+	ReadSeriesCardinality(ctx context.Context, req *datatypes.ReadSeriesCardinalityRequest) (cursors.Int64Iterator, error)
+	SupportReadSeriesCardinality(ctx context.Context) bool
 
 	GetSource(orgID, bucketID uint64) proto.Message
 }

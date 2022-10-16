@@ -13,27 +13,25 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/influxdata/flux"
 	"github.com/influxdata/flux/ast"
 	"github.com/influxdata/flux/csv"
 	"github.com/influxdata/flux/lang"
 	platform "github.com/influxdata/influxdb/v2"
+	_ "github.com/influxdata/influxdb/v2/fluxinit/static"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/mock"
 	"github.com/influxdata/influxdb/v2/query"
-	_ "github.com/influxdata/influxdb/v2/fluxinit/static"
 )
 
 var cmpOptions = cmp.Options{
 	cmpopts.IgnoreTypes(ast.BaseNode{}),
 	cmpopts.IgnoreUnexported(query.ProxyRequest{}),
 	cmpopts.IgnoreUnexported(query.Request{}),
-	cmpopts.IgnoreUnexported(flux.Spec{}),
 	cmpopts.EquateEmpty(),
 }
 
 func TestQueryRequest_WithDefaults(t *testing.T) {
 	type fields struct {
-		Spec    *flux.Spec
 		AST     json.RawMessage
 		Query   string
 		Type    string
@@ -191,7 +189,6 @@ func TestQueryRequest_Validate(t *testing.T) {
 func TestQueryRequest_proxyRequest(t *testing.T) {
 	type fields struct {
 		Extern  json.RawMessage
-		Spec    *flux.Spec
 		AST     json.RawMessage
 		Query   string
 		Type    string
@@ -393,7 +390,7 @@ func Test_decodeQueryRequest(t *testing.T) {
 				svc: &mock.OrganizationService{
 					FindOrganizationF: func(ctx context.Context, filter platform.OrganizationFilter) (*platform.Organization, error) {
 						return &platform.Organization{
-							ID: func() platform.ID { s, _ := platform.IDFromString("deadbeefdeadbeef"); return *s }(),
+							ID: func() platform2.ID { s, _ := platform2.IDFromString("deadbeefdeadbeef"); return *s }(),
 						}, nil
 					},
 				},
@@ -407,7 +404,7 @@ func Test_decodeQueryRequest(t *testing.T) {
 					Header:         func(x bool) *bool { return &x }(true),
 				},
 				Org: &platform.Organization{
-					ID: func() platform.ID { s, _ := platform.IDFromString("deadbeefdeadbeef"); return *s }(),
+					ID: func() platform2.ID { s, _ := platform2.IDFromString("deadbeefdeadbeef"); return *s }(),
 				},
 			},
 		},
@@ -422,7 +419,7 @@ func Test_decodeQueryRequest(t *testing.T) {
 				svc: &mock.OrganizationService{
 					FindOrganizationF: func(ctx context.Context, filter platform.OrganizationFilter) (*platform.Organization, error) {
 						return &platform.Organization{
-							ID: func() platform.ID { s, _ := platform.IDFromString("deadbeefdeadbeef"); return *s }(),
+							ID: func() platform2.ID { s, _ := platform2.IDFromString("deadbeefdeadbeef"); return *s }(),
 						}, nil
 					},
 				},
@@ -436,7 +433,7 @@ func Test_decodeQueryRequest(t *testing.T) {
 					Header:         func(x bool) *bool { return &x }(true),
 				},
 				Org: &platform.Organization{
-					ID: func() platform.ID { s, _ := platform.IDFromString("deadbeefdeadbeef"); return *s }(),
+					ID: func() platform2.ID { s, _ := platform2.IDFromString("deadbeefdeadbeef"); return *s }(),
 				},
 			},
 		},
@@ -508,14 +505,14 @@ func Test_decodeProxyQueryRequest(t *testing.T) {
 				svc: &mock.OrganizationService{
 					FindOrganizationF: func(ctx context.Context, filter platform.OrganizationFilter) (*platform.Organization, error) {
 						return &platform.Organization{
-							ID: func() platform.ID { s, _ := platform.IDFromString("deadbeefdeadbeef"); return *s }(),
+							ID: func() platform2.ID { s, _ := platform2.IDFromString("deadbeefdeadbeef"); return *s }(),
 						}, nil
 					},
 				},
 			},
 			want: &query.ProxyRequest{
 				Request: query.Request{
-					OrganizationID: func() platform.ID { s, _ := platform.IDFromString("deadbeefdeadbeef"); return *s }(),
+					OrganizationID: func() platform2.ID { s, _ := platform2.IDFromString("deadbeefdeadbeef"); return *s }(),
 					Compiler: lang.FluxCompiler{
 						Query: "from()",
 					},
@@ -540,14 +537,14 @@ func Test_decodeProxyQueryRequest(t *testing.T) {
 				svc: &mock.OrganizationService{
 					FindOrganizationF: func(ctx context.Context, filter platform.OrganizationFilter) (*platform.Organization, error) {
 						return &platform.Organization{
-							ID: func() platform.ID { s, _ := platform.IDFromString("deadbeefdeadbeef"); return *s }(),
+							ID: func() platform2.ID { s, _ := platform2.IDFromString("deadbeefdeadbeef"); return *s }(),
 						}, nil
 					},
 				},
 			},
 			want: &query.ProxyRequest{
 				Request: query.Request{
-					OrganizationID: func() platform.ID { s, _ := platform.IDFromString("deadbeefdeadbeef"); return *s }(),
+					OrganizationID: func() platform2.ID { s, _ := platform2.IDFromString("deadbeefdeadbeef"); return *s }(),
 					Compiler: lang.FluxCompiler{
 						Extern: []byte(externJSON),
 						Query:  `from(bucket: "mybucket")`,
@@ -572,14 +569,14 @@ func Test_decodeProxyQueryRequest(t *testing.T) {
 				svc: &mock.OrganizationService{
 					FindOrganizationF: func(ctx context.Context, filter platform.OrganizationFilter) (*platform.Organization, error) {
 						return &platform.Organization{
-							ID: func() platform.ID { s, _ := platform.IDFromString("deadbeefdeadbeef"); return *s }(),
+							ID: func() platform2.ID { s, _ := platform2.IDFromString("deadbeefdeadbeef"); return *s }(),
 						}, nil
 					},
 				},
 			},
 			want: &query.ProxyRequest{
 				Request: query.Request{
-					OrganizationID: func() platform.ID { s, _ := platform.IDFromString("deadbeefdeadbeef"); return *s }(),
+					OrganizationID: func() platform2.ID { s, _ := platform2.IDFromString("deadbeefdeadbeef"); return *s }(),
 					Compiler: lang.FluxCompiler{
 						Query: `from(bucket: "mybucket")`,
 					},

@@ -1,34 +1,18 @@
 package storage
 
 import (
-	"github.com/gogo/protobuf/types"
-	"github.com/influxdata/influxdb/v2"
+	"errors"
+
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
-// this is easier than fooling around with .proto files.
-
-type readSource struct {
-	BucketID       uint64 `protobuf:"varint,1,opt,name=bucket_id,proto3"`
-	OrganizationID uint64 `protobuf:"varint,2,opt,name=organization_id,proto3"`
-}
-
-func (r *readSource) XXX_MessageName() string { return "readSource" }
-func (r *readSource) Reset()                  { *r = readSource{} }
-func (r *readSource) String() string          { return "readSource{}" }
-func (r *readSource) ProtoMessage()           {}
-
-func getReadSource(any types.Any) (readSource, error) {
-	var source readSource
-	if err := types.UnmarshalAny(&any, &source); err != nil {
-		return source, err
+func GetReadSource(any *anypb.Any) (*ReadSource, error) {
+	if any == nil {
+		return nil, errors.New("reque")
 	}
-	return source, nil
-}
-
-func (r *readSource) GetOrgID() influxdb.ID {
-	return influxdb.ID(r.OrganizationID)
-}
-
-func (r *readSource) GetBucketID() influxdb.ID {
-	return influxdb.ID(r.BucketID)
+	var source ReadSource
+	if err := any.UnmarshalTo(&source); err != nil {
+		return nil, err
+	}
+	return &source, nil
 }

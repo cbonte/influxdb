@@ -8,6 +8,7 @@ import (
 	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/dbrp"
 	"github.com/influxdata/influxdb/v2/http"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/mock"
 	"github.com/influxdata/influxdb/v2/pkg/httpc"
 	"go.uber.org/zap/zaptest"
@@ -15,13 +16,13 @@ import (
 
 func setup(t *testing.T) (*dbrp.Client, func()) {
 	t.Helper()
-	dbrpSvc := &mock.DBRPMappingServiceV2{
-		CreateFn: func(ctx context.Context, dbrp *influxdb.DBRPMappingV2) error {
+	dbrpSvc := &mock.DBRPMappingService{
+		CreateFn: func(ctx context.Context, dbrp *influxdb.DBRPMapping) error {
 			dbrp.ID = 1
 			return nil
 		},
-		FindByIDFn: func(ctx context.Context, orgID, id influxdb.ID) (*influxdb.DBRPMappingV2, error) {
-			return &influxdb.DBRPMappingV2{
+		FindByIDFn: func(ctx context.Context, orgID, id platform.ID) (*influxdb.DBRPMapping, error) {
+			return &influxdb.DBRPMapping{
 				ID:              id,
 				Database:        "db",
 				RetentionPolicy: "rp",
@@ -30,8 +31,8 @@ func setup(t *testing.T) (*dbrp.Client, func()) {
 				BucketID:        1,
 			}, nil
 		},
-		FindManyFn: func(ctx context.Context, dbrp influxdb.DBRPMappingFilterV2, opts ...influxdb.FindOptions) ([]*influxdb.DBRPMappingV2, int, error) {
-			return []*influxdb.DBRPMappingV2{}, 0, nil
+		FindManyFn: func(ctx context.Context, dbrp influxdb.DBRPMappingFilter, opts ...influxdb.FindOptions) ([]*influxdb.DBRPMapping, int, error) {
+			return []*influxdb.DBRPMapping{}, 0, nil
 		},
 	}
 	orgSvc := &mock.OrganizationService{
@@ -59,7 +60,7 @@ func TestClient(t *testing.T) {
 		client, shutdown := setup(t)
 		defer shutdown()
 
-		if err := client.Create(context.Background(), &influxdb.DBRPMappingV2{
+		if err := client.Create(context.Background(), &influxdb.DBRPMapping{
 			Database:        "db",
 			RetentionPolicy: "rp",
 			Default:         false,
@@ -77,8 +78,8 @@ func TestClient(t *testing.T) {
 		if _, err := client.FindByID(context.Background(), 1, 1); err != nil {
 			t.Error(err)
 		}
-		oid := influxdb.ID(1)
-		if _, _, err := client.FindMany(context.Background(), influxdb.DBRPMappingFilterV2{OrgID: &oid}); err != nil {
+		oid := platform.ID(1)
+		if _, _, err := client.FindMany(context.Background(), influxdb.DBRPMappingFilter{OrgID: &oid}); err != nil {
 			t.Error(err)
 		}
 	})
@@ -87,7 +88,7 @@ func TestClient(t *testing.T) {
 		client, shutdown := setup(t)
 		defer shutdown()
 
-		if err := client.Update(context.Background(), &influxdb.DBRPMappingV2{
+		if err := client.Update(context.Background(), &influxdb.DBRPMapping{
 			ID:              1,
 			Database:        "db",
 			RetentionPolicy: "rp",

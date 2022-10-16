@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	errors2 "github.com/influxdata/influxdb/v2/kit/platform/errors"
 	icheck "github.com/influxdata/influxdb/v2/notification/check"
 	"github.com/influxdata/influxdb/v2/notification/endpoint"
 )
@@ -122,18 +124,18 @@ func (k Kind) is(comps ...Kind) bool {
 
 // SafeID is an equivalent influxdb.ID that encodes safely with
 // zero values (influxdb.ID == 0).
-type SafeID influxdb.ID
+type SafeID platform.ID
 
 // Encode will safely encode the id.
 func (s SafeID) Encode() ([]byte, error) {
-	id := influxdb.ID(s)
+	id := platform.ID(s)
 	b, _ := id.Encode()
 	return b, nil
 }
 
 // String prints a encoded string representation of the id.
 func (s SafeID) String() string {
-	return influxdb.ID(s).String()
+	return platform.ID(s).String()
 }
 
 // DiffIdentifier are the identifying fields for any given resource. Each resource
@@ -200,9 +202,11 @@ type (
 
 	// DiffBucketValues are the varying values for a bucket.
 	DiffBucketValues struct {
-		Name           string         `json:"name"`
-		Description    string         `json:"description"`
-		RetentionRules retentionRules `json:"retentionRules"`
+		Name               string             `json:"name"`
+		Description        string             `json:"description"`
+		RetentionRules     retentionRules     `json:"retentionRules"`
+		SchemaType         string             `json:"schemaType,omitempty"`
+		MeasurementSchemas measurementSchemas `json:"measurementSchemas,omitempty"`
 	}
 )
 
@@ -226,7 +230,7 @@ func (d DiffCheckValues) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON decodes the check values.
 func (d *DiffCheckValues) UnmarshalJSON(b []byte) (err error) {
 	d.Check, err = icheck.UnmarshalJSON(b)
-	if influxdb.EInternal == influxdb.ErrorCode(err) {
+	if errors2.EInternal == errors2.ErrorCode(err) {
 		return nil
 	}
 	return err
@@ -340,7 +344,7 @@ func (d DiffNotificationEndpointValues) MarshalJSON() ([]byte, error) {
 // UnmarshalJSON decodes the notification endpoint. This is necessary unfortunately.
 func (d *DiffNotificationEndpointValues) UnmarshalJSON(b []byte) (err error) {
 	d.NotificationEndpoint, err = endpoint.UnmarshalJSON(b)
-	if influxdb.EInvalid == influxdb.ErrorCode(err) {
+	if errors2.EInvalid == errors2.ErrorCode(err) {
 		return nil
 	}
 	return
@@ -466,7 +470,21 @@ type SummaryBucket struct {
 	// TODO: return retention rules?
 	RetentionPeriod time.Duration `json:"retentionPeriod"`
 
+	SchemaType         string                     `json:"schemaType,omitempty"`
+	MeasurementSchemas []SummaryMeasurementSchema `json:"measurementSchemas,omitempty"`
+
 	LabelAssociations []SummaryLabel `json:"labelAssociations"`
+}
+
+type SummaryMeasurementSchema struct {
+	Name    string                           `json:"name"`
+	Columns []SummaryMeasurementSchemaColumn `json:"columns"`
+}
+
+type SummaryMeasurementSchemaColumn struct {
+	Name     string `json:"name"`
+	Type     string `json:"type"`
+	DataType string `json:"dataType,omitempty"`
 }
 
 // SummaryCheck provides a summary of a pkg check.

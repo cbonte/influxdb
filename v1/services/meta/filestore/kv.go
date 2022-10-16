@@ -3,7 +3,6 @@ package filestore
 import (
 	"context"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"sync"
@@ -30,6 +29,14 @@ func (s *KVStore) View(ctx context.Context, f func(kv.Tx) error) error {
 
 func (s *KVStore) Update(ctx context.Context, f func(kv.Tx) error) error {
 	return f(&Tx{kv: s, ctx: ctx, writable: true})
+}
+
+func (s *KVStore) RLock() {
+	s.mu.RLock()
+}
+
+func (s *KVStore) RUnlock() {
+	s.mu.RUnlock()
 }
 
 func (s *KVStore) Backup(ctx context.Context, w io.Writer) error {
@@ -98,7 +105,7 @@ func (s *KVStore) GetBatch(keys ...[]byte) (values [][]byte, err error) {
 }
 
 func (s *KVStore) get() ([]byte, error) {
-	if d, err := ioutil.ReadFile(s.full); os.IsNotExist(err) {
+	if d, err := os.ReadFile(s.full); os.IsNotExist(err) {
 		return nil, kv.ErrKeyNotFound
 	} else if err != nil {
 		return nil, err

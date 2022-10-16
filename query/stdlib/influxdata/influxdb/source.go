@@ -11,7 +11,7 @@ import (
 	"github.com/influxdata/flux/memory"
 	"github.com/influxdata/flux/metadata"
 	"github.com/influxdata/flux/plan"
-	platform "github.com/influxdata/influxdb/v2"
+	platform2 "github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kit/tracing"
 	"github.com/influxdata/influxdb/v2/query"
 	"github.com/influxdata/influxdb/v2/tsdb/cursors"
@@ -34,27 +34,20 @@ type Source struct {
 	id execute.DatasetID
 	ts []execute.Transformation
 
-	alloc *memory.Allocator
+	alloc memory.Allocator
 	stats cursors.CursorStats
 
 	runner runner
 
 	m     *metrics
-	orgID platform.ID
+	orgID platform2.ID
 	op    string
 }
 
 func (s *Source) Run(ctx context.Context) {
 	labelValues := s.m.getLabelValues(ctx, s.orgID, s.op)
 	start := time.Now()
-	var err error
-	if flux.IsQueryTracingEnabled(ctx) {
-		span, ctxWithSpan := tracing.StartSpanFromContextWithOperationName(ctx, "source-"+s.op)
-		err = s.runner.run(ctxWithSpan)
-		span.Finish()
-	} else {
-		err = s.runner.run(ctx)
-	}
+	err := s.runner.run(ctx)
 	s.m.recordMetrics(labelValues, start)
 	for _, t := range s.ts {
 		t.Finish(s.id, err)
@@ -354,9 +347,10 @@ func createReadWindowAggregateSource(s plan.ProcedureSpec, id execute.DatasetID,
 				Period: spec.WindowEvery,
 				Offset: spec.Offset,
 			},
-			Aggregates:  spec.Aggregates,
-			CreateEmpty: spec.CreateEmpty,
-			TimeColumn:  spec.TimeColumn,
+			Aggregates:     spec.Aggregates,
+			CreateEmpty:    spec.CreateEmpty,
+			TimeColumn:     spec.TimeColumn,
+			ForceAggregate: spec.ForceAggregate,
 		},
 		a,
 	), nil

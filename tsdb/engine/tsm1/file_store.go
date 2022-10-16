@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math"
 	"os"
 	"path/filepath"
@@ -15,14 +15,15 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/influxdata/influxdb/v2/influxql/query"
-	"github.com/influxdata/influxdb/v2/models"
 	"github.com/influxdata/influxdb/v2/pkg/file"
 	"github.com/influxdata/influxdb/v2/pkg/limiter"
 	"github.com/influxdata/influxdb/v2/pkg/metrics"
 	"github.com/influxdata/influxdb/v2/tsdb"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/zap"
 )
 
@@ -110,9 +111,9 @@ type TSMFile interface {
 	// HasTombstones returns true if file contains values that have been deleted.
 	HasTombstones() bool
 
-	// TombstoneFiles returns the tombstone filestats if there are any tombstones
+	// TombstoneStats returns the tombstone filestats if there are any tombstones
 	// written for this file.
-	TombstoneFiles() []FileStat
+	TombstoneStats() TombstoneStat
 
 	// Close closes the underlying file resources.
 	Close() error
@@ -121,7 +122,7 @@ type TSMFile interface {
 	Size() uint32
 
 	// Rename renames the existing TSM file to a new name and replaces the mmap backing slice using the new
-	// file name.  Index and Reader state are not re-initialized.
+	// file name. Index and Reader state are not re-initialized.
 	Rename(path string) error
 
 	// Remove deletes the file from the filesystem.
@@ -146,12 +147,6 @@ type TSMFile interface {
 	// Free releases any resources held by the FileStore to free up system resources.
 	Free() error
 }
-
-// Statistics gathered by the FileStore.
-const (
-	statFileStoreBytes = "diskBytes"
-	statFileStoreCount = "numFiles"
-)
 
 var (
 	floatBlocksDecodedCounter    = metrics.MustRegisterCounter("float_blocks_decoded", metrics.WithGroup(tsmGroup))
@@ -185,7 +180,7 @@ type FileStore struct {
 	traceLogger  *zap.Logger // Logger to be used when trace-logging is on.
 	traceLogging bool
 
-	stats  *FileStoreStatistics
+	stats  *fileStoreMetrics
 	purger *purger
 
 	currentTempDirID int
@@ -193,6 +188,8 @@ type FileStore struct {
 	parseFileName ParseFileNameFunc
 
 	obs tsdb.FileStoreObserver
+
+	copyFiles bool
 }
 
 // FileStat holds information about a TSM file on disk.
@@ -203,6 +200,14 @@ type FileStat struct {
 	LastModified     int64
 	MinTime, MaxTime int64
 	MinKey, MaxKey   []byte
+}
+
+// TombstoneStat holds information about a possible tombstone file on disk.
+type TombstoneStat struct {
+	TombstoneExists bool
+	Path            string
+	LastModified    int64
+	Size            uint32
 }
 
 // OverlapsTimeRange returns true if the time range of the file intersect min and max.
@@ -221,7 +226,7 @@ func (f FileStat) ContainsKey(key []byte) bool {
 }
 
 // NewFileStore returns a new instance of FileStore based on the given directory.
-func NewFileStore(dir string) *FileStore {
+func NewFileStore(dir string, tags tsdb.EngineTags) *FileStore {
 	logger := zap.NewNop()
 	fs := &FileStore{
 		dir:          dir,
@@ -229,13 +234,14 @@ func NewFileStore(dir string) *FileStore {
 		logger:       logger,
 		traceLogger:  logger,
 		openLimiter:  limiter.NewFixed(runtime.GOMAXPROCS(0)),
-		stats:        &FileStoreStatistics{},
+		stats:        newFileStoreMetrics(tags),
 		purger: &purger{
 			files:  map[string]TSMFile{},
 			logger: logger,
 		},
 		obs:           noFileStoreObserver{},
 		parseFileName: DefaultParseFileName,
+		copyFiles:     runtime.GOOS == "windows",
 	}
 	fs.purger.fileStore = fs
 	return fs
@@ -272,22 +278,66 @@ func (f *FileStore) WithLogger(log *zap.Logger) {
 	}
 }
 
-// FileStoreStatistics keeps statistics about the file store.
-type FileStoreStatistics struct {
-	DiskBytes int64
-	FileCount int64
+var globalFileStoreMetrics = newAllFileStoreMetrics()
+
+const filesSubsystem = "tsm_files"
+
+type allFileStoreMetrics struct {
+	files *prometheus.GaugeVec
+	size  *prometheus.GaugeVec
 }
 
-// Statistics returns statistics for periodic monitoring.
-func (f *FileStore) Statistics(tags map[string]string) []models.Statistic {
-	return []models.Statistic{{
-		Name: "tsm1_filestore",
-		Tags: tags,
-		Values: map[string]interface{}{
-			statFileStoreBytes: atomic.LoadInt64(&f.stats.DiskBytes),
-			statFileStoreCount: atomic.LoadInt64(&f.stats.FileCount),
-		},
-	}}
+type fileStoreMetrics struct {
+	files      prometheus.Gauge
+	size       prometheus.Gauge
+	sizeAtomic int64
+}
+
+func (f *fileStoreMetrics) AddSize(n int64) {
+	val := atomic.AddInt64(&f.sizeAtomic, n)
+	f.size.Set(float64(val))
+}
+
+func (f *fileStoreMetrics) SetSize(n int64) {
+	atomic.StoreInt64(&f.sizeAtomic, n)
+	f.size.Set(float64(n))
+}
+
+func (f *fileStoreMetrics) SetFiles(n int64) {
+	f.files.Set(float64(n))
+}
+
+func newAllFileStoreMetrics() *allFileStoreMetrics {
+	labels := tsdb.EngineLabelNames()
+	return &allFileStoreMetrics{
+		files: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: storageNamespace,
+			Subsystem: filesSubsystem,
+			Name:      "total",
+			Help:      "Gauge of number of files per shard",
+		}, labels),
+		size: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: storageNamespace,
+			Subsystem: filesSubsystem,
+			Name:      "disk_bytes",
+			Help:      "Gauge of data size in bytes for each shard",
+		}, labels),
+	}
+}
+
+func FileStoreCollectors() []prometheus.Collector {
+	return []prometheus.Collector{
+		globalFileStoreMetrics.files,
+		globalFileStoreMetrics.size,
+	}
+}
+
+func newFileStoreMetrics(tags tsdb.EngineTags) *fileStoreMetrics {
+	labels := tags.GetLabels()
+	return &fileStoreMetrics{
+		files: globalFileStoreMetrics.files.With(labels),
+		size:  globalFileStoreMetrics.size.With(labels),
+	}
 }
 
 // Count returns the number of TSM files currently loaded.
@@ -394,7 +444,7 @@ func (f *FileStore) Delete(keys [][]byte) error {
 	return f.DeleteRange(keys, math.MinInt64, math.MaxInt64)
 }
 
-func (f *FileStore) Apply(fn func(r TSMFile) error) error {
+func (f *FileStore) Apply(ctx context.Context, fn func(r TSMFile) error) error {
 	// Limit apply fn to number of cores
 	limiter := limiter.NewFixed(runtime.GOMAXPROCS(0))
 
@@ -403,7 +453,10 @@ func (f *FileStore) Apply(fn func(r TSMFile) error) error {
 
 	for _, f := range f.files {
 		go func(r TSMFile) {
-			limiter.Take()
+			if err := limiter.Take(ctx); err != nil {
+				errC <- err
+				return
+			}
 			defer limiter.Release()
 
 			r.Ref()
@@ -464,7 +517,7 @@ func (f *FileStore) DeleteRange(keys [][]byte, min, max int64) error {
 }
 
 // Open loads all the TSM files in the configured directory.
-func (f *FileStore) Open() error {
+func (f *FileStore) Open(ctx context.Context) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -478,7 +531,7 @@ func (f *FileStore) Open() error {
 	}
 
 	// find the current max ID for temp directories
-	tmpfiles, err := ioutil.ReadDir(f.dir)
+	tmpfiles, err := os.ReadDir(f.dir)
 	if err != nil {
 		return err
 	}
@@ -538,7 +591,11 @@ func (f *FileStore) Open() error {
 			// Ensure a limited number of TSM files are loaded at once.
 			// Systems which have very large datasets (1TB+) can have thousands
 			// of TSM files which can cause extremely long load times.
-			f.openLimiter.Take()
+			if err := f.openLimiter.Take(ctx); err != nil {
+				f.logger.Error("Failed to open tsm file", zap.String("path", file.Name()), zap.Error(err))
+				readerC <- &res{err: fmt.Errorf("failed to open tsm file %q: %w", file.Name(), err)}
+				return
+			}
 			defer f.openLimiter.Release()
 
 			start := time.Now()
@@ -568,6 +625,7 @@ func (f *FileStore) Open() error {
 	}
 
 	var lm int64
+	isEmpty := true
 	for range files {
 		res := <-readerC
 		if res.err != nil {
@@ -578,22 +636,31 @@ func (f *FileStore) Open() error {
 		f.files = append(f.files, res.r)
 
 		// Accumulate file store size stats
-		atomic.AddInt64(&f.stats.DiskBytes, int64(res.r.Size()))
-		for _, ts := range res.r.TombstoneFiles() {
-			atomic.AddInt64(&f.stats.DiskBytes, int64(ts.Size))
+		f.stats.AddSize(int64(res.r.Size()))
+		if ts := res.r.TombstoneStats(); ts.TombstoneExists {
+			f.stats.AddSize(int64(ts.Size))
 		}
 
 		// Re-initialize the lastModified time for the file store
 		if res.r.LastModified() > lm {
 			lm = res.r.LastModified()
 		}
-
+		isEmpty = false
 	}
-	f.lastModified = time.Unix(0, lm).UTC()
+	if isEmpty {
+		if fi, err := os.Stat(f.dir); err == nil {
+			f.lastModified = fi.ModTime().UTC()
+		} else {
+			close(readerC)
+			return err
+		}
+	} else {
+		f.lastModified = time.Unix(0, lm).UTC()
+	}
 	close(readerC)
 
 	sort.Sort(tsmReaders(f.files))
-	atomic.StoreInt64(&f.stats.FileCount, int64(len(f.files)))
+	f.stats.SetFiles(int64(len(f.files)))
 	return nil
 }
 
@@ -606,7 +673,8 @@ func (f *FileStore) Close() error {
 
 	f.lastFileStats = nil
 	f.files = nil
-	atomic.StoreInt64(&f.stats.FileCount, 0)
+
+	f.stats.SetFiles(0)
 
 	// Let other methods access this closed object while we do the actual closing.
 	f.mu.Unlock()
@@ -622,7 +690,7 @@ func (f *FileStore) Close() error {
 }
 
 func (f *FileStore) DiskSizeBytes() int64 {
-	return atomic.LoadInt64(&f.stats.DiskBytes)
+	return atomic.LoadInt64(&f.stats.sizeAtomic)
 }
 
 // Read returns the slice of values for the given key and the given timestamp,
@@ -812,8 +880,8 @@ func (f *FileStore) replace(oldFiles, newFiles []string, updatedFn func(r []TSMF
 					return err
 				}
 
-				for _, t := range file.TombstoneFiles() {
-					if err := f.obs.FileUnlinking(t.Path); err != nil {
+				if ts := file.TombstoneStats(); ts.TombstoneExists {
+					if err := f.obs.FileUnlinking(ts.Path); err != nil {
 						return err
 					}
 				}
@@ -831,8 +899,8 @@ func (f *FileStore) replace(oldFiles, newFiles []string, updatedFn func(r []TSMF
 				if file.InUse() {
 					// Copy all the tombstones related to this TSM file
 					var deletes []string
-					for _, t := range file.TombstoneFiles() {
-						deletes = append(deletes, t.Path)
+					if ts := file.TombstoneStats(); ts.TombstoneExists {
+						deletes = append(deletes, ts.Path)
 					}
 
 					// Rename the TSM file used by this reader
@@ -888,18 +956,17 @@ func (f *FileStore) replace(oldFiles, newFiles []string, updatedFn func(r []TSMF
 	f.lastFileStats = nil
 	f.files = active
 	sort.Sort(tsmReaders(f.files))
-	atomic.StoreInt64(&f.stats.FileCount, int64(len(f.files)))
+	f.stats.SetFiles(int64(len(f.files)))
 
 	// Recalculate the disk size stat
 	var totalSize int64
 	for _, file := range f.files {
 		totalSize += int64(file.Size())
-		for _, ts := range file.TombstoneFiles() {
+		if ts := file.TombstoneStats(); ts.TombstoneExists {
 			totalSize += int64(ts.Size)
 		}
-
 	}
-	atomic.StoreInt64(&f.stats.DiskBytes, totalSize)
+	f.stats.SetSize(totalSize)
 
 	return nil
 }
@@ -1050,6 +1117,101 @@ func (f *FileStore) locations(key []byte, t int64, ascending bool) []*location {
 	return locations
 }
 
+// MakeSnapshotLinks creates hardlinks from the supplied TSMFiles to
+// corresponding files under a supplied directory.
+func (f *FileStore) MakeSnapshotLinks(destPath string, files []TSMFile) (returnErr error) {
+	for _, tsmf := range files {
+		newpath := filepath.Join(destPath, filepath.Base(tsmf.Path()))
+		err := f.copyOrLink(tsmf.Path(), newpath)
+		if err != nil {
+			return err
+		}
+		if tf := tsmf.TombstoneStats(); tf.TombstoneExists {
+			newpath := filepath.Join(destPath, filepath.Base(tf.Path))
+			err := f.copyOrLink(tf.Path, newpath)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (f *FileStore) copyOrLink(oldpath string, newpath string) error {
+	if f.copyFiles {
+		f.logger.Info("copying backup snapshots", zap.String("OldPath", oldpath), zap.String("NewPath", newpath))
+		if err := f.copyNotLink(oldpath, newpath); err != nil {
+			return err
+		}
+	} else {
+		f.logger.Info("linking backup snapshots", zap.String("OldPath", oldpath), zap.String("NewPath", newpath))
+		if err := f.linkNotCopy(oldpath, newpath); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// copyNotLink - use file copies instead of hard links for 2 scenarios:
+// Windows does not permit deleting a file with open file handles
+// Azure does not support hard links in its default file system
+func (f *FileStore) copyNotLink(oldPath, newPath string) (returnErr error) {
+	rfd, err := os.Open(oldPath)
+	if err != nil {
+		return fmt.Errorf("error opening file for backup %s: %q", oldPath, err)
+	} else {
+		defer func() {
+			if e := rfd.Close(); returnErr == nil && e != nil {
+				returnErr = fmt.Errorf("error closing source file for backup %s: %w", oldPath, e)
+			}
+		}()
+	}
+	fi, err := rfd.Stat()
+	if err != nil {
+		return fmt.Errorf("error collecting statistics from file for backup %s: %w", oldPath, err)
+	}
+	wfd, err := os.OpenFile(newPath, os.O_RDWR|os.O_CREATE, fi.Mode())
+	if err != nil {
+		return fmt.Errorf("error creating temporary file for backup %s:  %w", newPath, err)
+	} else {
+		defer func() {
+			if e := wfd.Close(); returnErr == nil && e != nil {
+				returnErr = fmt.Errorf("error closing temporary file for backup %s: %w", newPath, e)
+			}
+		}()
+	}
+	if _, err := io.Copy(wfd, rfd); err != nil {
+		return fmt.Errorf("unable to copy file for backup from %s to %s: %w", oldPath, newPath, err)
+	}
+	if err := os.Chtimes(newPath, fi.ModTime(), fi.ModTime()); err != nil {
+		return fmt.Errorf("unable to set modification time on temporary backup file %s: %w", newPath, err)
+	}
+	return nil
+}
+
+// linkNotCopy - use hard links for backup snapshots
+func (f *FileStore) linkNotCopy(oldPath, newPath string) error {
+	if err := os.Link(oldPath, newPath); err != nil {
+		if errors.Is(err, syscall.ENOTSUP) {
+			if fi, e := os.Stat(oldPath); e == nil && !fi.IsDir() {
+				f.logger.Info("file system does not support hard links, switching to copies for backup", zap.String("OldPath", oldPath), zap.String("NewPath", newPath))
+				// Force future snapshots to copy
+				f.copyFiles = true
+				return f.copyNotLink(oldPath, newPath)
+			} else if e != nil {
+				// Stat failed
+				return fmt.Errorf("error creating hard link for backup, cannot determine if %s is a file or directory: %w", oldPath, e)
+			} else {
+				return fmt.Errorf("error creating hard link for backup - %s is a directory, not a file: %q", oldPath, err)
+			}
+		} else {
+			return fmt.Errorf("error creating hard link for backup from %s to %s: %w", oldPath, newPath, err)
+		}
+	} else {
+		return nil
+	}
+}
+
 // CreateSnapshot creates hardlinks for all tsm and tombstone files
 // in the path provided.
 func (f *FileStore) CreateSnapshot() (string, error) {
@@ -1079,17 +1241,10 @@ func (f *FileStore) CreateSnapshot() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, tsmf := range files {
-		newpath := filepath.Join(tmpPath, filepath.Base(tsmf.Path()))
-		if err := os.Link(tsmf.Path(), newpath); err != nil {
-			return "", fmt.Errorf("error creating tsm hard link: %q", err)
-		}
-		for _, tf := range tsmf.TombstoneFiles() {
-			newpath := filepath.Join(tmpPath, filepath.Base(tf.Path))
-			if err := os.Link(tf.Path, newpath); err != nil {
-				return "", fmt.Errorf("error creating tombstone hard link: %q", err)
-			}
-		}
+	if err := f.MakeSnapshotLinks(tmpPath, files); err != nil {
+		// remove temporary directory since we couldn't create our hard links.
+		_ = os.RemoveAll(tmpPath)
+		return "", fmt.Errorf("CreateSnapshot() failed to create links %v: %w", tmpPath, err)
 	}
 
 	return tmpPath, nil

@@ -11,6 +11,7 @@ import (
 	"github.com/influxdata/flux/execute"
 	"github.com/influxdata/flux/plan"
 	"github.com/influxdata/flux/semantic"
+	"github.com/influxdata/flux/stdlib/experimental/table"
 	"github.com/influxdata/flux/stdlib/influxdata/influxdb"
 	"github.com/influxdata/flux/stdlib/universe"
 	"github.com/influxdata/flux/values"
@@ -27,16 +28,18 @@ func init() {
 		PushDownReadTagValuesRule{},
 		SortedPivotRule{},
 		PushDownWindowAggregateRule{},
+		PushDownWindowForceAggregateRule{},
 		PushDownWindowAggregateByTimeRule{},
+		PushDownAggregateWindowRule{},
 		PushDownBareAggregateRule{},
 		GroupWindowAggregateTransposeRule{},
-		// PushDownGroupAggregateRule{},
-		SwitchFillImplRule{},
-		SwitchSchemaMutationImplRule{},
+		PushDownGroupAggregateRule{},
 	)
-	plan.RegisterLogicalRules(
-		MergeFiltersRule{},
-	)
+	// TODO(lesam): re-enable MergeFilterRule once it works with complex use cases
+	// such as filter() |> geo.strictFilter(). See geo_merge_filter flux test.
+	// plan.RegisterLogicalRules(
+	//	MergeFiltersRule{},
+	// )
 }
 
 type FromStorageRule struct{}
@@ -46,7 +49,7 @@ func (rule FromStorageRule) Name() string {
 }
 
 func (rule FromStorageRule) Pattern() plan.Pattern {
-	return plan.Pat(influxdb.FromKind)
+	return plan.MultiSuccessor(influxdb.FromKind)
 }
 
 func (rule FromStorageRule) Rewrite(ctx context.Context, node plan.Node) (plan.Node, bool, error) {
@@ -73,7 +76,7 @@ func (rule PushDownGroupRule) Name() string {
 }
 
 func (rule PushDownGroupRule) Pattern() plan.Pattern {
-	return plan.Pat(universe.GroupKind, plan.Pat(ReadRangePhysKind))
+	return plan.MultiSuccessor(universe.GroupKind, plan.SingleSuccessor(ReadRangePhysKind))
 }
 
 func (rule PushDownGroupRule) Rewrite(ctx context.Context, node plan.Node) (plan.Node, bool, error) {
@@ -112,7 +115,7 @@ func (rule PushDownRangeRule) Name() string {
 
 // Pattern matches 'from |> range'
 func (rule PushDownRangeRule) Pattern() plan.Pattern {
-	return plan.Pat(universe.RangeKind, plan.Pat(FromKind))
+	return plan.MultiSuccessor(universe.RangeKind, plan.SingleSuccessor(FromKind))
 }
 
 // Rewrite converts 'from |> range' into 'ReadRange'
@@ -137,7 +140,7 @@ func (PushDownFilterRule) Name() string {
 }
 
 func (PushDownFilterRule) Pattern() plan.Pattern {
-	return plan.Pat(universe.FilterKind, plan.Pat(ReadRangePhysKind))
+	return plan.MultiSuccessor(universe.FilterKind, plan.SingleSuccessor(ReadRangePhysKind))
 }
 
 func (PushDownFilterRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node, bool, error) {
@@ -160,7 +163,7 @@ func (PushDownFilterRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node,
 		return pn, false, nil
 	}
 
-	paramName := filterSpec.Fn.Fn.Parameters.List[0].Key.Name
+	paramName := filterSpec.Fn.Fn.Parameters.List[0].Key.Name.Name()
 
 	pushable, notPushable, err := semantic.PartitionPredicates(bodyExpr, func(e semantic.Expression) (bool, error) {
 		return isPushableExpr(paramName, e)
@@ -234,10 +237,10 @@ func (rule PushDownReadTagKeysRule) Name() string {
 }
 
 func (rule PushDownReadTagKeysRule) Pattern() plan.Pattern {
-	return plan.Pat(universe.DistinctKind,
-		plan.Pat(universe.SchemaMutationKind,
-			plan.Pat(universe.KeysKind,
-				plan.Pat(ReadRangePhysKind))))
+	return plan.MultiSuccessor(universe.DistinctKind,
+		plan.SingleSuccessor(universe.SchemaMutationKind,
+			plan.SingleSuccessor(universe.KeysKind,
+				plan.SingleSuccessor(ReadRangePhysKind))))
 }
 
 func (rule PushDownReadTagKeysRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node, bool, error) {
@@ -296,10 +299,10 @@ func (rule PushDownReadTagValuesRule) Name() string {
 }
 
 func (rule PushDownReadTagValuesRule) Pattern() plan.Pattern {
-	return plan.Pat(universe.DistinctKind,
-		plan.Pat(universe.GroupKind,
-			plan.Pat(universe.SchemaMutationKind,
-				plan.Pat(ReadRangePhysKind))))
+	return plan.MultiSuccessor(universe.DistinctKind,
+		plan.SingleSuccessor(universe.GroupKind,
+			plan.SingleSuccessor(universe.SchemaMutationKind,
+				plan.SingleSuccessor(ReadRangePhysKind))))
 }
 
 func (rule PushDownReadTagValuesRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node, bool, error) {
@@ -534,12 +537,12 @@ const fieldValueProperty = "_value"
 
 func isTag(paramName string, e semantic.Expression) bool {
 	memberExpr := validateMemberExpr(paramName, e)
-	return memberExpr != nil && memberExpr.Property != fieldValueProperty
+	return memberExpr != nil && memberExpr.Property.Name() != fieldValueProperty
 }
 
 func isField(paramName string, e semantic.Expression) bool {
 	memberExpr := validateMemberExpr(paramName, e)
-	return memberExpr != nil && memberExpr.Property == fieldValueProperty
+	return memberExpr != nil && memberExpr.Property.Name() == fieldValueProperty
 }
 
 func validateMemberExpr(paramName string, e semantic.Expression) *semantic.MemberExpression {
@@ -553,7 +556,7 @@ func validateMemberExpr(paramName string, e semantic.Expression) *semantic.Membe
 		return nil
 	}
 
-	if idExpr.Name != paramName {
+	if idExpr.Name.Name() != paramName {
 		return nil
 	}
 
@@ -610,7 +613,7 @@ func (SortedPivotRule) Name() string {
 }
 
 func (SortedPivotRule) Pattern() plan.Pattern {
-	return plan.Pat(universe.PivotKind, plan.Pat(ReadRangePhysKind))
+	return plan.MultiSuccessor(universe.PivotKind, plan.SingleSuccessor(ReadRangePhysKind))
 }
 
 func (SortedPivotRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node, bool, error) {
@@ -674,8 +677,8 @@ var windowPushableAggs = []plan.ProcedureKind{
 }
 
 func (rule PushDownWindowAggregateRule) Pattern() plan.Pattern {
-	return plan.OneOf(windowPushableAggs,
-		plan.Pat(universe.WindowKind, plan.Pat(ReadRangePhysKind)))
+	return plan.MultiSuccessorOneOf(windowPushableAggs,
+		plan.SingleSuccessor(universe.WindowKind, plan.SingleSuccessor(ReadRangePhysKind)))
 }
 
 func canPushWindowedAggregate(ctx context.Context, fnNode plan.Node) bool {
@@ -714,6 +717,7 @@ func isPushableWindow(windowSpec *universe.WindowProcedureSpec) bool {
 	// every and period must be equal
 	// every.isNegative must be false
 	// offset.isNegative must be false
+	// location must be UTC with no offset
 	// timeColumn: must be "_time"
 	// startColumn: must be "_start"
 	// stopColumn: must be "_stop"
@@ -722,6 +726,7 @@ func isPushableWindow(windowSpec *universe.WindowProcedureSpec) bool {
 	return window.Every.Equal(window.Period) &&
 		!window.Every.IsNegative() &&
 		!window.Offset.IsNegative() &&
+		window.Location.IsUTC() &&
 		windowSpec.TimeColumn == "_time" &&
 		windowSpec.StartColumn == "_start" &&
 		windowSpec.StopColumn == "_stop"
@@ -752,7 +757,44 @@ func (PushDownWindowAggregateRule) Rewrite(ctx context.Context, pn plan.Node) (p
 	}), true, nil
 }
 
-// PushDownWindowAggregateWithTimeRule will match the given pattern.
+// PushDownWindowForceAggregateRule will match the given pattern.
+// ReadWindowAggregatePhys |> table.fill()
+//
+// If this pattern matches, then the ForceAggregate switch will be enabled
+// on the ReadWindowAggregate which will force selectors to return a null value.
+//
+// This pattern is idempotent and may be applied multiple times with the same effect.
+type PushDownWindowForceAggregateRule struct{}
+
+func (PushDownWindowForceAggregateRule) Name() string {
+	return "PushDownWindowForceAggregateRule"
+}
+
+func (PushDownWindowForceAggregateRule) Pattern() plan.Pattern {
+	return plan.MultiSuccessor(table.FillKind,
+		plan.SingleSuccessor(ReadWindowAggregatePhysKind))
+}
+
+func (PushDownWindowForceAggregateRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node, bool, error) {
+	windowAggregateNode := pn.Predecessors()[0]
+	windowAggregateSpec := windowAggregateNode.ProcedureSpec().(*ReadWindowAggregatePhysSpec)
+	if windowAggregateSpec.WindowEvery == flux.ConvertDuration(math.MaxInt64) {
+		// Do not apply this transformation to the bare aggregate case.
+		// There's virtually no benefit to pushing that down since there are no
+		// subsequent transformations to push down and I'm not actually sure the
+		// code works properly in that case.
+		return pn, false, nil
+	}
+	windowAggregateSpec.ForceAggregate = true
+
+	newNode, err := plan.MergeToPhysicalNode(pn, windowAggregateNode, windowAggregateSpec)
+	if err != nil {
+		return pn, false, err
+	}
+	return newNode, true, nil
+}
+
+// PushDownWindowAggregateByTimeRule will match the given pattern.
 // ReadWindowAggregatePhys |> duplicate |> window(every: inf)
 //
 // If this pattern matches and the arguments to duplicate are
@@ -764,10 +806,10 @@ func (PushDownWindowAggregateByTimeRule) Name() string {
 	return "PushDownWindowAggregateByTimeRule"
 }
 
-func (rule PushDownWindowAggregateByTimeRule) Pattern() plan.Pattern {
-	return plan.Pat(universe.WindowKind,
-		plan.Pat(universe.SchemaMutationKind,
-			plan.Pat(ReadWindowAggregatePhysKind)))
+func (PushDownWindowAggregateByTimeRule) Pattern() plan.Pattern {
+	return plan.MultiSuccessor(universe.WindowKind,
+		plan.SingleSuccessor(universe.SchemaMutationKind,
+			plan.SingleSuccessor(ReadWindowAggregatePhysKind)))
 }
 
 func (PushDownWindowAggregateByTimeRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node, bool, error) {
@@ -816,6 +858,57 @@ func (PushDownWindowAggregateByTimeRule) Rewrite(ctx context.Context, pn plan.No
 	return plan.CreateUniquePhysicalNode(ctx, "ReadWindowAggregateByTime", windowAggregateSpec), true, nil
 }
 
+type PushDownAggregateWindowRule struct{}
+
+func (p PushDownAggregateWindowRule) Name() string {
+	return "PushDownAggregateWindowRule"
+}
+
+func (p PushDownAggregateWindowRule) Pattern() plan.Pattern {
+	return plan.MultiSuccessor(universe.AggregateWindowKind,
+		plan.SingleSuccessor(ReadRangePhysKind))
+}
+
+func (p PushDownAggregateWindowRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node, bool, error) {
+	aggregateWindowSpec := pn.ProcedureSpec().(*universe.AggregateWindowProcedureSpec)
+	fromNode := pn.Predecessors()[0]
+	fromSpec := fromNode.ProcedureSpec().(*ReadRangePhysSpec)
+
+	if !isPushableWindow(aggregateWindowSpec.WindowSpec) {
+		return pn, false, nil
+	}
+
+	if aggregateWindowSpec.ValueCol != execute.DefaultValueColLabel {
+		return pn, false, nil
+	}
+
+	switch aggregateWindowSpec.AggregateKind {
+	case universe.MinKind, universe.MaxKind,
+		universe.MeanKind, universe.CountKind, universe.SumKind,
+		universe.FirstKind, universe.LastKind:
+		// All of these are supported.
+	default:
+		return pn, false, nil
+	}
+
+	windowAggregateSpec := &ReadWindowAggregatePhysSpec{
+		ReadRangePhysSpec: *fromSpec.Copy().(*ReadRangePhysSpec),
+		Aggregates: []plan.ProcedureKind{
+			aggregateWindowSpec.AggregateKind,
+		},
+		WindowEvery:    aggregateWindowSpec.WindowSpec.Window.Every,
+		Offset:         aggregateWindowSpec.WindowSpec.Window.Offset,
+		CreateEmpty:    aggregateWindowSpec.WindowSpec.CreateEmpty,
+		TimeColumn:     execute.DefaultStopColLabel,
+		ForceAggregate: aggregateWindowSpec.ForceAggregate,
+	}
+	if aggregateWindowSpec.UseStart {
+		windowAggregateSpec.TimeColumn = execute.DefaultStartColLabel
+	}
+
+	return plan.CreateUniquePhysicalNode(ctx, "ReadWindowAggregateByTime", windowAggregateSpec), true, nil
+}
+
 // PushDownBareAggregateRule is a rule that allows pushing down of aggregates
 // that are directly over a ReadRange source.
 type PushDownBareAggregateRule struct{}
@@ -825,8 +918,8 @@ func (p PushDownBareAggregateRule) Name() string {
 }
 
 func (p PushDownBareAggregateRule) Pattern() plan.Pattern {
-	return plan.OneOf(windowPushableAggs,
-		plan.Pat(ReadRangePhysKind))
+	return plan.MultiSuccessorOneOf(windowPushableAggs,
+		plan.SingleSuccessor(ReadRangePhysKind))
 }
 
 func (p PushDownBareAggregateRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node, bool, error) {
@@ -869,8 +962,8 @@ var windowMergeablePushAggs = []plan.ProcedureKind{
 }
 
 func (p GroupWindowAggregateTransposeRule) Pattern() plan.Pattern {
-	return plan.OneOf(windowMergeablePushAggs,
-		plan.Pat(universe.WindowKind, plan.Pat(ReadGroupPhysKind)))
+	return plan.MultiSuccessorOneOf(windowMergeablePushAggs,
+		plan.SingleSuccessor(universe.WindowKind, plan.SingleSuccessor(ReadGroupPhysKind)))
 }
 
 func (p GroupWindowAggregateTransposeRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node, bool, error) {
@@ -936,7 +1029,7 @@ func (p GroupWindowAggregateTransposeRule) Rewrite(ctx context.Context, pn plan.
 	switch spec := fnNode.ProcedureSpec().(type) {
 	case *universe.CountProcedureSpec:
 		newFnNode := plan.CreateUniquePhysicalNode(ctx, "sum", &universe.SumProcedureSpec{
-			AggregateConfig: spec.AggregateConfig,
+			SimpleAggregateConfig: spec.SimpleAggregateConfig,
 		})
 		plan.ReplaceNode(fnNode, newFnNode)
 		fnNode = newFnNode
@@ -958,7 +1051,7 @@ func (PushDownGroupAggregateRule) Name() string {
 }
 
 func (rule PushDownGroupAggregateRule) Pattern() plan.Pattern {
-	return plan.OneOf(
+	return plan.MultiSuccessorOneOf(
 		[]plan.ProcedureKind{
 			universe.CountKind,
 			universe.SumKind,
@@ -967,7 +1060,7 @@ func (rule PushDownGroupAggregateRule) Pattern() plan.Pattern {
 			universe.MinKind,
 			universe.MaxKind,
 		},
-		plan.Pat(ReadGroupPhysKind))
+		plan.SingleSuccessor(ReadGroupPhysKind))
 }
 
 func (PushDownGroupAggregateRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node, bool, error) {
@@ -1062,47 +1155,6 @@ func canPushGroupedAggregate(ctx context.Context, pn plan.Node) bool {
 		return agg.Column == execute.DefaultValueColLabel
 	}
 	return false
-}
-
-type SwitchFillImplRule struct{}
-
-func (SwitchFillImplRule) Name() string {
-	return "SwitchFillImplRule"
-}
-
-func (SwitchFillImplRule) Pattern() plan.Pattern {
-	return plan.Pat(universe.FillKind, plan.Any())
-}
-
-func (r SwitchFillImplRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node, bool, error) {
-	if !feature.MemoryOptimizedFill().Enabled(ctx) {
-		spec := pn.ProcedureSpec().Copy()
-		universe.UseDeprecatedImpl(spec)
-		if err := pn.ReplaceSpec(spec); err != nil {
-			return nil, false, err
-		}
-	}
-	return pn, false, nil
-}
-
-type SwitchSchemaMutationImplRule struct{}
-
-func (SwitchSchemaMutationImplRule) Name() string {
-	return "SwitchSchemaMutationImplRule"
-}
-
-func (SwitchSchemaMutationImplRule) Pattern() plan.Pattern {
-	return plan.Pat(universe.SchemaMutationKind, plan.Any())
-}
-
-func (r SwitchSchemaMutationImplRule) Rewrite(ctx context.Context, pn plan.Node) (plan.Node, bool, error) {
-	spec, ok := pn.ProcedureSpec().(*universe.DualImplProcedureSpec)
-	if !ok || spec.UseDeprecated {
-		return pn, false, nil
-	}
-
-	spec.UseDeprecated = !feature.MemoryOptimizedSchemaMutation().Enabled(ctx)
-	return pn, spec.UseDeprecated, nil
 }
 
 func asSchemaMutationProcedureSpec(spec plan.ProcedureSpec) *universe.SchemaMutationProcedureSpec {

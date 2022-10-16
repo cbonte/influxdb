@@ -6,6 +6,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kv"
 	"github.com/influxdata/influxdb/v2/tenant"
 	influxdbtesting "github.com/influxdata/influxdb/v2/testing"
@@ -16,11 +17,7 @@ func TestBoltUserService(t *testing.T) {
 }
 
 func initBoltUserService(f influxdbtesting.UserFields, t *testing.T) (influxdb.UserService, string, func()) {
-	s, closeBolt, err := NewTestBoltStore(t)
-	if err != nil {
-		t.Fatalf("failed to create new kv store: %v", err)
-	}
-
+	s, closeBolt := influxdbtesting.NewTestBoltStore(t)
 	svc, op, closeSvc := initUserService(s, f, t)
 	return svc, op, func() {
 		closeSvc()
@@ -52,11 +49,7 @@ func TestBoltPasswordService(t *testing.T) {
 }
 
 func initBoltPasswordsService(f influxdbtesting.PasswordFields, t *testing.T) (influxdb.PasswordsService, func()) {
-	s, closeStore, err := NewTestBoltStore(t)
-	if err != nil {
-		t.Fatalf("failed to create new bolt kv store: %v", err)
-	}
-
+	s, closeStore := influxdbtesting.NewTestBoltStore(t)
 	svc, closeSvc := initPasswordsService(s, f, t)
 	return svc, func() {
 		closeSvc()
@@ -90,10 +83,7 @@ func initPasswordsService(s kv.Store, f influxdbtesting.PasswordFields, t *testi
 }
 
 func TestFindPermissionsFromUser(t *testing.T) {
-	s, _, err := NewTestInmemStore(t)
-	if err != nil {
-		t.Fatal(err)
-	}
+	s := influxdbtesting.NewTestInmemStore(t)
 	storage := tenant.NewStore(s)
 	svc := tenant.NewService(storage)
 
@@ -110,7 +100,7 @@ func TestFindPermissionsFromUser(t *testing.T) {
 	ctx := context.Background()
 
 	// createSomeURMS
-	err = svc.CreateUserResourceMapping(ctx, &influxdb.UserResourceMapping{
+	err := svc.CreateUserResourceMapping(ctx, &influxdb.UserResourceMapping{
 		UserID:       u.ID,
 		UserType:     influxdb.Member,
 		ResourceType: influxdb.OrgsResourceType,
@@ -135,7 +125,7 @@ func TestFindPermissionsFromUser(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orgID := influxdb.ID(1)
+	orgID := platform.ID(1)
 	expected := influxdb.PermissionSet{
 		influxdb.Permission{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &orgID, Type: influxdb.AuthorizationsResourceType}},
 		influxdb.Permission{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &orgID, Type: influxdb.BucketsResourceType}},
@@ -155,6 +145,10 @@ func TestFindPermissionsFromUser(t *testing.T) {
 		influxdb.Permission{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &orgID, Type: influxdb.NotificationEndpointResourceType}},
 		influxdb.Permission{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &orgID, Type: influxdb.ChecksResourceType}},
 		influxdb.Permission{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &orgID, Type: influxdb.DBRPResourceType}},
+		influxdb.Permission{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &orgID, Type: influxdb.NotebooksResourceType}},
+		influxdb.Permission{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &orgID, Type: influxdb.AnnotationsResourceType}},
+		influxdb.Permission{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &orgID, Type: influxdb.RemotesResourceType}},
+		influxdb.Permission{Action: influxdb.ReadAction, Resource: influxdb.Resource{OrgID: &orgID, Type: influxdb.ReplicationsResourceType}},
 		influxdb.Permission{Action: influxdb.ReadAction, Resource: influxdb.Resource{Type: influxdb.UsersResourceType, ID: &u.ID}},
 		influxdb.Permission{Action: influxdb.WriteAction, Resource: influxdb.Resource{Type: influxdb.UsersResourceType, ID: &u.ID}},
 	}

@@ -2,7 +2,7 @@ package http
 
 import (
 	"context"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -10,6 +10,7 @@ import (
 	"github.com/influxdata/httprouter"
 	"github.com/influxdata/influxdb/v2"
 	pcontext "github.com/influxdata/influxdb/v2/context"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"github.com/influxdata/influxdb/v2/mock"
 	influxtesting "github.com/influxdata/influxdb/v2/testing"
@@ -73,7 +74,7 @@ var (
 	findDocsServiceMock = &mock.DocumentService{
 		FindDocumentStoreFn: func(context.Context, string) (influxdb.DocumentStore, error) {
 			return &mock.DocumentStore{
-				FindDocumentsFn: func(ctx context.Context, _ influxdb.ID) ([]*influxdb.Document, error) {
+				FindDocumentsFn: func(ctx context.Context, _ platform.ID) ([]*influxdb.Document, error) {
 					return docs, nil
 				},
 			}, nil
@@ -96,7 +97,7 @@ func TestService_handleGetDocuments(t *testing.T) {
 	}
 	type args struct {
 		authorizer influxdb.Authorizer
-		orgID      influxdb.ID
+		orgID      platform.ID
 	}
 	type wants struct {
 		statusCode  int
@@ -117,7 +118,7 @@ func TestService_handleGetDocuments(t *testing.T) {
 			},
 			args: args{
 				authorizer: mock.NewMockAuthorizer(true, nil),
-				orgID:      influxdb.ID(2),
+				orgID:      platform.ID(2),
 			},
 			wants: wants{
 				statusCode:  http.StatusOK,
@@ -129,7 +130,7 @@ func TestService_handleGetDocuments(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			documentBackend := NewMockDocumentBackend(t)
-			documentBackend.HTTPErrorHandler = kithttp.ErrorHandler(0)
+			documentBackend.HTTPErrorHandler = kithttp.NewErrorHandler(zaptest.NewLogger(t))
 			documentBackend.DocumentService = tt.fields.DocumentService
 			h := NewDocumentHandler(documentBackend)
 
@@ -150,7 +151,7 @@ func TestService_handleGetDocuments(t *testing.T) {
 			h.handleGetDocuments(w, r)
 			res := w.Result()
 			content := res.Header.Get("Content-Type")
-			body, _ := ioutil.ReadAll(res.Body)
+			body, _ := io.ReadAll(res.Body)
 
 			if res.StatusCode != tt.wants.statusCode {
 				t.Errorf("%q. handleGetDocuments() = %v, want %v", tt.name, res.StatusCode, tt.wants.statusCode)

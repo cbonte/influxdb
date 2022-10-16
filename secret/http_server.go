@@ -6,6 +6,8 @@ import (
 
 	"github.com/go-chi/chi"
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"go.uber.org/zap"
 )
@@ -32,8 +34,8 @@ func NewHandler(log *zap.Logger, idLookupKey string, svc influxdb.SecretService)
 
 	r.Get("/", h.handleGetSecrets)
 	r.Patch("/", h.handlePatchSecrets)
-	// TODO: this shouldn't be a post to delete
-	r.Post("/delete", h.handleDeleteSecrets)
+	r.Delete("/{secretID}", h.handleDeleteSecret)
+	r.Post("/delete", h.handleDeleteSecrets) // deprecated
 	return r
 }
 
@@ -45,7 +47,7 @@ func (h *handler) handleGetSecrets(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ks, err := h.svc.GetSecretKeys(r.Context(), orgID)
-	if err != nil && influxdb.ErrorCode(err) != influxdb.ENotFound {
+	if err != nil && errors.ErrorCode(err) != errors.ENotFound {
 		h.api.Err(w, r, err)
 		return
 	}
@@ -58,7 +60,7 @@ type secretsResponse struct {
 	Secrets []string          `json:"secrets"`
 }
 
-func newSecretsResponse(orgID influxdb.ID, ks []string) *secretsResponse {
+func newSecretsResponse(orgID platform.ID, ks []string) *secretsResponse {
 	if ks == nil {
 		ks = []string{}
 	}
@@ -96,7 +98,8 @@ type secretsDeleteBody struct {
 	Secrets []string `json:"secrets"`
 }
 
-// handleDeleteSecrets is the HTTP handler for the DELETE /api/v2/orgs/:id/secrets route.
+// handleDeleteSecrets is the HTTP handler for the POST /api/v2/orgs/:id/secrets/delete route.
+// deprecated.
 func (h *handler) handleDeleteSecrets(w http.ResponseWriter, r *http.Request) {
 	orgID, err := h.decodeOrgID(r)
 	if err != nil {
@@ -118,17 +121,32 @@ func (h *handler) handleDeleteSecrets(w http.ResponseWriter, r *http.Request) {
 	h.api.Respond(w, r, http.StatusNoContent, nil)
 }
 
-func (h *handler) decodeOrgID(r *http.Request) (influxdb.ID, error) {
+// handleDeleteSecret is the HTTP handler for the DELETE /api/v2/orgs/:id/secrets/:id route.
+func (h *handler) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
+	orgID, err := h.decodeOrgID(r)
+	if err != nil {
+		h.api.Err(w, r, err)
+	}
+
+	if err := h.svc.DeleteSecret(r.Context(), orgID, chi.URLParam(r, "secretID")); err != nil {
+		h.api.Err(w, r, err)
+		return
+	}
+
+	h.api.Respond(w, r, http.StatusNoContent, nil)
+}
+
+func (h *handler) decodeOrgID(r *http.Request) (platform.ID, error) {
 	org := chi.URLParam(r, h.idLookupKey)
 	if org == "" {
-		return influxdb.InvalidID(), &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return platform.InvalidID(), &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "url missing id",
 		}
 	}
-	id, err := influxdb.IDFromString(org)
+	id, err := platform.IDFromString(org)
 	if err != nil {
-		return influxdb.InvalidID(), err
+		return platform.InvalidID(), err
 	}
 	return *id, nil
 }

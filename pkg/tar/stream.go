@@ -24,19 +24,23 @@ func Stream(w io.Writer, dir, relativePath string, writeFunc func(f os.FileInfo,
 		writeFunc = StreamFile
 	}
 
-	return filepath.Walk(dir, func(path string, f os.FileInfo, err error) error {
+	return filepath.WalkDir(dir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 
 		// Skip adding an entry for the root dir
-		if dir == path && f.IsDir() {
+		if dir == path && entry.IsDir() {
 			return nil
 		}
 
-		// Figure out the the full relative path including any sub-dirs
+		// Figure out the full relative path including any sub-dirs
 		subDir, _ := filepath.Split(path)
 		subDir, err = filepath.Rel(dir, subDir)
+		if err != nil {
+			return err
+		}
+		f, err := entry.Info()
 		if err != nil {
 			return err
 		}
@@ -62,7 +66,7 @@ func StreamFile(f os.FileInfo, shardRelativePath, fullPath string, tw *tar.Write
 	return StreamRenameFile(f, f.Name(), shardRelativePath, fullPath, tw)
 }
 
-/// Stream a single file to tw, using tarHeaderFileName instead of the actual filename
+// Stream a single file to tw, using tarHeaderFileName instead of the actual filename
 // e.g., when we want to write a *.tmp file using the original file's non-tmp name.
 func StreamRenameFile(f os.FileInfo, tarHeaderFileName, relativePath, fullPath string, tw *tar.Writer) error {
 	h, err := tar.FileInfoHeader(f, f.Name())

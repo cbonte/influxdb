@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gogo/protobuf/proto"
 	pr "github.com/influxdata/influxdb/v2/prometheus"
 	dto "github.com/prometheus/client_model/go"
 	"github.com/prometheus/common/expfmt"
 	"go.uber.org/zap/zaptest"
+	"google.golang.org/protobuf/proto"
 )
 
 func TestPushGateway_Handler(t *testing.T) {
@@ -227,7 +227,7 @@ func badMetric() *dto.MetricFamily {
 		Name: proto.String("bad"),
 		Type: dto.MetricType_COUNTER.Enum(),
 		Metric: []*dto.Metric{
-			&dto.Metric{
+			{
 				Label: []*dto.LabelPair{pr.L("n1", "v1")},
 				Counter: &dto.Counter{
 					Value: proto.Float64(1.0),
@@ -243,7 +243,7 @@ func goodMetric() *dto.MetricFamily {
 		Name: proto.String("good"),
 		Type: dto.MetricType_COUNTER.Enum(),
 		Metric: []*dto.Metric{
-			&dto.Metric{
+			{
 				Label: []*dto.LabelPair{pr.L("n1", "v1")},
 				Counter: &dto.Counter{
 					Value: proto.Float64(1.0),

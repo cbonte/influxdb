@@ -6,9 +6,11 @@ package mock
 
 import (
 	context "context"
+	reflect "reflect"
+
 	gomock "github.com/golang/mock/gomock"
 	influxdb "github.com/influxdata/influxdb/v2"
-	reflect "reflect"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 )
 
 // MockPermissionService is a mock of PermissionService interface
@@ -35,7 +37,7 @@ func (m *MockPermissionService) EXPECT() *MockPermissionServiceMockRecorder {
 }
 
 // FindPermissionForUser mocks base method
-func (m *MockPermissionService) FindPermissionForUser(ctx context.Context, UserID influxdb.ID) (influxdb.PermissionSet, error) {
+func (m *MockPermissionService) FindPermissionForUser(ctx context.Context, UserID platform.ID) (influxdb.PermissionSet, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "FindPermissionForUser", ctx, UserID)
 	ret0, _ := ret[0].(influxdb.PermissionSet)
@@ -73,10 +75,10 @@ func (m *MockPromise) EXPECT() *MockPromiseMockRecorder {
 }
 
 // ID mocks base method
-func (m *MockPromise) ID() influxdb.ID {
+func (m *MockPromise) ID() platform.ID {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "ID")
-	ret0, _ := ret[0].(influxdb.ID)
+	ret0, _ := ret[0].(platform.ID)
 	return ret0
 }
 

@@ -11,15 +11,15 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/gogo/protobuf/proto"
 	"github.com/influxdata/influxdb/v2/influxql/query"
 	"github.com/influxdata/influxdb/v2/models"
 	influxdb "github.com/influxdata/influxdb/v2/v1"
 	internal "github.com/influxdata/influxdb/v2/v1/services/meta/internal"
 	"github.com/influxdata/influxql"
+	"google.golang.org/protobuf/proto"
 )
 
-//go:generate protoc --gogo_out=. internal/meta.proto
+//go:generate protoc --go_out=internal/ internal/meta.proto
 
 const (
 	// DefaultRetentionPolicyReplicaN is the default value of RetentionPolicyInfo.ReplicaN.
@@ -143,7 +143,7 @@ func (data *Data) CreateRetentionPolicy(database string, rpi *RetentionPolicyInf
 	// Normalise ShardDuration before comparing to any existing
 	// retention policies. The client is supposed to do this, but
 	// do it again to verify input.
-	rpi.ShardGroupDuration = normalisedShardDuration(rpi.ShardGroupDuration, rpi.Duration)
+	rpi.ShardGroupDuration = NormalisedShardDuration(rpi.ShardGroupDuration, rpi.Duration)
 
 	if rpi.Duration > 0 && rpi.Duration < rpi.ShardGroupDuration {
 		return ErrIncompatibleDurations
@@ -260,7 +260,7 @@ func (data *Data) UpdateRetentionPolicy(database, name string, rpu *RetentionPol
 		rpi.ReplicaN = *rpu.ReplicaN
 	}
 	if rpu.ShardGroupDuration != nil {
-		rpi.ShardGroupDuration = normalisedShardDuration(*rpu.ShardGroupDuration, rpi.Duration)
+		rpi.ShardGroupDuration = NormalisedShardDuration(*rpu.ShardGroupDuration, rpi.Duration)
 	}
 
 	if di.DefaultRetentionPolicy != rpi.Name && makeDefault {
@@ -369,16 +369,48 @@ func (data *Data) CreateShardGroup(database, policy string, timestamp time.Time,
 		return nil
 	}
 
+	startTime := timestamp.Truncate(rpi.ShardGroupDuration).UTC()
+	endTime := startTime.Add(rpi.ShardGroupDuration).UTC()
+	if endTime.After(time.Unix(0, models.MaxNanoTime)) {
+		// Shard group range is [start, end) so add one to the max time.
+		endTime = time.Unix(0, models.MaxNanoTime+1)
+	}
+
+	for i := range rpi.ShardGroups {
+		if rpi.ShardGroups[i].Deleted() {
+			continue
+		}
+		startI := rpi.ShardGroups[i].StartTime
+		endI := rpi.ShardGroups[i].EndTime
+		if rpi.ShardGroups[i].Truncated() {
+			endI = rpi.ShardGroups[i].TruncatedAt
+		}
+
+		// shard_i covers range [start_i, end_i)
+		// We want the largest range [startTime, endTime) such that all of the following hold:
+		//   startTime <= timestamp < endTime
+		//   for all i, not { start_i < endTime && startTime < end_i }
+		// Assume the above conditions are true for shards index < i, we want to modify startTime,endTime so they are true
+		// also for shard_i
+
+		// It must be the case that either endI <= timestamp || timestamp < startI, because otherwise:
+		// startI <= timestamp < endI means timestamp is contained in shard I
+		if !timestamp.Before(endI) && endI.After(startTime) {
+			// startTime < endI <= timestamp
+			startTime = endI
+		}
+		if startI.After(timestamp) && startI.Before(endTime) {
+			// timestamp < startI < endTime
+			endTime = startI
+		}
+	}
+
 	// Create the shard group.
 	data.MaxShardGroupID++
 	sgi := ShardGroupInfo{}
 	sgi.ID = data.MaxShardGroupID
-	sgi.StartTime = timestamp.Truncate(rpi.ShardGroupDuration).UTC()
-	sgi.EndTime = sgi.StartTime.Add(rpi.ShardGroupDuration).UTC()
-	if sgi.EndTime.After(time.Unix(0, models.MaxNanoTime)) {
-		// Shard group range is [start, end) so add one to the max time.
-		sgi.EndTime = time.Unix(0, models.MaxNanoTime+1)
-	}
+	sgi.StartTime = startTime
+	sgi.EndTime = endTime
 
 	if len(shards) > 0 {
 		sgi.Shards = make([]ShardInfo, len(shards))
@@ -1076,7 +1108,7 @@ func (s *RetentionPolicySpec) Matches(rpi *RetentionPolicyInfo) bool {
 	// Normalise ShardDuration before comparing to any existing retention policies.
 	// Normalize with the retention policy info's duration instead of the spec
 	// since they should be the same and we're performing a comparison.
-	sgDuration := normalisedShardDuration(s.ShardGroupDuration, rpi.Duration)
+	sgDuration := NormalisedShardDuration(s.ShardGroupDuration, rpi.Duration)
 	return sgDuration == rpi.ShardGroupDuration
 }
 
@@ -1184,7 +1216,7 @@ func (rpi *RetentionPolicyInfo) Apply(spec *RetentionPolicySpec) *RetentionPolic
 	if spec.Duration != nil {
 		rp.Duration = *spec.Duration
 	}
-	rp.ShardGroupDuration = normalisedShardDuration(spec.ShardGroupDuration, rp.Duration)
+	rp.ShardGroupDuration = NormalisedShardDuration(spec.ShardGroupDuration, rp.Duration)
 	return rp
 }
 
@@ -1308,8 +1340,8 @@ func shardGroupDuration(d time.Duration) time.Duration {
 	return 1 * time.Hour
 }
 
-// normalisedShardDuration returns normalised shard duration based on a policy duration.
-func normalisedShardDuration(sgd, d time.Duration) time.Duration {
+// NormalisedShardDuration returns normalised shard duration based on a policy duration.
+func NormalisedShardDuration(sgd, d time.Duration) time.Duration {
 	// If it is zero, it likely wasn't specified, so we default to the shard group duration
 	if sgd == 0 {
 		return shardGroupDuration(d)
@@ -1514,9 +1546,11 @@ func (si *ShardInfo) unmarshal(pb *internal.ShardInfo) {
 	si.ID = pb.GetID()
 
 	// If deprecated "OwnerIDs" exists then convert it to "Owners" format.
-	if len(pb.GetOwnerIDs()) > 0 {
-		si.Owners = make([]ShardOwner, len(pb.GetOwnerIDs()))
-		for i, x := range pb.GetOwnerIDs() {
+	//lint:ignore SA1019 we need to check for the presence of the deprecated field so we can convert it
+	oldStyleOwnerIds := pb.GetOwnerIDs()
+	if len(oldStyleOwnerIds) > 0 {
+		si.Owners = make([]ShardOwner, len(oldStyleOwnerIds))
+		for i, x := range oldStyleOwnerIds {
 			si.Owners[i].unmarshal(&internal.ShardOwner{
 				NodeID: proto.Uint64(x),
 			})
@@ -1544,9 +1578,7 @@ func (si SubscriptionInfo) marshal() *internal.SubscriptionInfo {
 	}
 
 	pb.Destinations = make([]string, len(si.Destinations))
-	for i := range si.Destinations {
-		pb.Destinations[i] = si.Destinations[i]
-	}
+	copy(pb.Destinations, si.Destinations)
 	return pb
 }
 

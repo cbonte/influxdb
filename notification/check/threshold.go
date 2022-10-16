@@ -6,10 +6,13 @@ import (
 	"strings"
 
 	"github.com/influxdata/flux/ast"
+	"github.com/influxdata/flux/ast/astutil"
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/notification"
 	"github.com/influxdata/influxdb/v2/notification/flux"
 	"github.com/influxdata/influxdb/v2/query"
+	"github.com/influxdata/influxdb/v2/query/fluxlang"
 )
 
 var _ influxdb.Check = (*Threshold)(nil)
@@ -26,7 +29,7 @@ func (t Threshold) Type() string {
 }
 
 // Valid returns error if something is invalid.
-func (t Threshold) Valid(lang influxdb.FluxLanguageService) error {
+func (t Threshold) Valid(lang fluxlang.FluxLanguageService) error {
 	if err := t.Base.Valid(lang); err != nil {
 		return err
 	}
@@ -82,7 +85,7 @@ func (t *Threshold) UnmarshalJSON(b []byte) error {
 			}
 			t.Thresholds = append(t.Thresholds, td)
 		default:
-			return &influxdb.Error{
+			return &errors.Error{
 				Msg: fmt.Sprintf("invalid threshold type %s", tdRaw.Type),
 			}
 		}
@@ -104,19 +107,19 @@ func multiError(errs []error) error {
 // GenerateFlux returns a flux script for the threshold provided. If there
 // are any errors in the flux that the user provided the function will return
 // an error for each error found when the script is parsed.
-func (t Threshold) GenerateFlux(lang influxdb.FluxLanguageService) (string, error) {
-	p, err := t.GenerateFluxAST(lang)
+func (t Threshold) GenerateFlux(lang fluxlang.FluxLanguageService) (string, error) {
+	f, err := t.GenerateFluxAST(lang)
 	if err != nil {
 		return "", err
 	}
 
-	return ast.Format(p), nil
+	return astutil.Format(f)
 }
 
 // GenerateFluxAST returns a flux AST for the threshold provided. If there
 // are any errors in the flux that the user provided the function will return
 // an error for each error found when the script is parsed.
-func (t Threshold) GenerateFluxAST(lang influxdb.FluxLanguageService) (*ast.Package, error) {
+func (t Threshold) GenerateFluxAST(lang fluxlang.FluxLanguageService) (*ast.File, error) {
 	p, err := query.Parse(lang, t.Query.Text)
 	if p == nil {
 		return nil, err
@@ -146,7 +149,7 @@ func (t Threshold) GenerateFluxAST(lang influxdb.FluxLanguageService) (*ast.Pack
 	f.Imports = append(f.Imports, flux.Imports("influxdata/influxdb/monitor", "influxdata/influxdb/v1")...)
 	f.Body = append(f.Body, t.generateFluxASTBody(fields[0])...)
 
-	return p, nil
+	return f, nil
 }
 
 // TODO(desa): we'll likely want something slightly more sophisitcated long term, but this should work for now.
@@ -466,8 +469,8 @@ func (td Range) MarshalJSON() ([]byte, error) {
 // Valid overwrite the base threshold.
 func (td Range) Valid() error {
 	if td.Min > td.Max {
-		return &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "range threshold min can't be larger than max",
 		}
 	}

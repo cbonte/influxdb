@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"math/rand"
 	"os"
@@ -21,20 +20,22 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/influxdata/influxdb/v2/influxql/query"
-	"github.com/influxdata/influxdb/v2/logger"
 	"github.com/influxdata/influxdb/v2/models"
 	"github.com/influxdata/influxdb/v2/pkg/deep"
 	"github.com/influxdata/influxdb/v2/tsdb"
 	"github.com/influxdata/influxdb/v2/tsdb/engine/tsm1"
 	"github.com/influxdata/influxdb/v2/tsdb/index/tsi1"
 	"github.com/influxdata/influxql"
+	tassert "github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
 )
 
 // Ensure that deletes only sent to the WAL will clear out the data from the cache on restart
 func TestEngine_DeleteWALLoadMetadata(t *testing.T) {
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			if err := e.WritePointsString(
@@ -46,7 +47,7 @@ func TestEngine_DeleteWALLoadMetadata(t *testing.T) {
 
 			// Remove series.
 			itr := &seriesIterator{keys: [][]byte{[]byte("cpu,host=A")}}
-			if err := e.DeleteSeriesRange(itr, math.MinInt64, math.MaxInt64); err != nil {
+			if err := e.DeleteSeriesRange(context.Background(), itr, math.MinInt64, math.MaxInt64); err != nil {
 				t.Fatalf("failed to delete series: %s", err.Error())
 			}
 
@@ -70,7 +71,7 @@ func TestEngine_DeleteWALLoadMetadata(t *testing.T) {
 func TestEngine_DeleteSeriesAfterCacheSnapshot(t *testing.T) {
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			if err := e.WritePointsString(
@@ -116,7 +117,7 @@ func TestEngine_DeleteSeriesAfterCacheSnapshot(t *testing.T) {
 				[]byte("cpu,host=B"),
 			},
 			}
-			if err := e.DeleteSeriesRange(itr, math.MinInt64, math.MaxInt64); err != nil {
+			if err := e.DeleteSeriesRange(context.Background(), itr, math.MinInt64, math.MaxInt64); err != nil {
 				t.Fatalf("failed to delete series: %s", err.Error())
 			}
 
@@ -174,10 +175,10 @@ func seriesExist(e *Engine, m string, dims []string) (int, error) {
 
 // Ensure that the engine can write & read shard digest files.
 func TestEngine_Digest(t *testing.T) {
-	e := MustOpenEngine(tsi1.IndexName)
+	e := MustOpenEngine(t, tsi1.IndexName)
 	defer e.Close()
 
-	if err := e.Open(); err != nil {
+	if err := e.Open(context.Background()); err != nil {
 		t.Fatalf("failed to open tsm1 engine: %s", err.Error())
 	}
 
@@ -187,7 +188,7 @@ func TestEngine_Digest(t *testing.T) {
 		MustParsePointString("cpu,host=B value=1.2 2000000000"),
 	}
 
-	if err := e.WritePoints(points); err != nil {
+	if err := e.WritePoints(context.Background(), points); err != nil {
 		t.Fatalf("failed to write points: %s", err.Error())
 	}
 
@@ -283,7 +284,7 @@ func TestEngine_Digest(t *testing.T) {
 		MustParsePointString("cpu,host=C value=1.1 3000000000"),
 	}
 
-	if err := e.WritePoints(points); err != nil {
+	if err := e.WritePoints(context.Background(), points); err != nil {
 		t.Fatalf("failed to write points: %s", err.Error())
 	}
 
@@ -322,10 +323,10 @@ type span struct {
 
 // Ensure engine handles concurrent calls to Digest().
 func TestEngine_Digest_Concurrent(t *testing.T) {
-	e := MustOpenEngine(tsi1.IndexName)
+	e := MustOpenEngine(t, tsi1.IndexName)
 	defer e.Close()
 
-	if err := e.Open(); err != nil {
+	if err := e.Open(context.Background()); err != nil {
 		t.Fatalf("failed to open tsm1 engine: %s", err.Error())
 	}
 
@@ -335,7 +336,7 @@ func TestEngine_Digest_Concurrent(t *testing.T) {
 		MustParsePointString("cpu,host=B value=1.2 2000000000"),
 	}
 
-	if err := e.WritePoints(points); err != nil {
+	if err := e.WritePoints(context.Background(), points); err != nil {
 		t.Fatalf("failed to write points: %s", err.Error())
 	}
 
@@ -377,7 +378,7 @@ func TestEngine_Backup(t *testing.T) {
 	defer sfile.Close()
 
 	// Generate temporary file.
-	f, _ := ioutil.TempFile("", "tsm")
+	f, _ := os.CreateTemp("", "tsm")
 	f.Close()
 	os.Remove(f.Name())
 	walPath := filepath.Join(f.Name(), "wal")
@@ -400,18 +401,18 @@ func TestEngine_Backup(t *testing.T) {
 	// mock the planner so compactions don't run during the test
 	e.CompactionPlan = &mockPlanner{}
 
-	if err := e.Open(); err != nil {
+	if err := e.Open(context.Background()); err != nil {
 		t.Fatalf("failed to open tsm1 engine: %s", err.Error())
 	}
 
-	if err := e.WritePoints([]models.Point{p1}); err != nil {
+	if err := e.WritePoints(context.Background(), []models.Point{p1}); err != nil {
 		t.Fatalf("failed to write points: %s", err.Error())
 	}
 	if err := e.WriteSnapshot(); err != nil {
 		t.Fatalf("failed to snapshot: %s", err.Error())
 	}
 
-	if err := e.WritePoints([]models.Point{p2}); err != nil {
+	if err := e.WritePoints(context.Background(), []models.Point{p2}); err != nil {
 		t.Fatalf("failed to write points: %s", err.Error())
 	}
 
@@ -457,7 +458,7 @@ func TestEngine_Backup(t *testing.T) {
 	// so this test won't work properly unless the file is at least a second past the last one
 	time.Sleep(time.Second)
 
-	if err := e.WritePoints([]models.Point{p3}); err != nil {
+	if err := e.WritePoints(context.Background(), []models.Point{p3}); err != nil {
 		t.Fatalf("failed to write points: %s", err.Error())
 	}
 
@@ -476,11 +477,27 @@ func TestEngine_Backup(t *testing.T) {
 	if !strings.Contains(mostRecentFile, th.Name) || th.Name == "" {
 		t.Fatalf("file name doesn't match:\n\tgot: %s\n\texp: %s", th.Name, mostRecentFile)
 	}
+	storeDir := filepath.Dir(e.FileStore.Files()[0].Path())
+	dfd, err := os.Open(storeDir)
+	if err != nil {
+		t.Fatalf("cannot open filestore directory %s: %q", storeDir, err)
+	} else {
+		defer dfd.Close()
+	}
+	files, err := dfd.Readdirnames(0)
+	if err != nil {
+		t.Fatalf("cannot read directory %s: %q", storeDir, err)
+	}
+	for _, f := range files {
+		if strings.HasSuffix(f, tsm1.TmpTSMFileExtension) {
+			t.Fatalf("temporary directory for backup not cleaned up: %s", f)
+		}
+	}
 }
 
 func TestEngine_Export(t *testing.T) {
 	// Generate temporary file.
-	f, _ := ioutil.TempFile("", "tsm")
+	f, _ := os.CreateTemp("", "tsm")
 	f.Close()
 	os.Remove(f.Name())
 	walPath := filepath.Join(f.Name(), "wal")
@@ -506,25 +523,25 @@ func TestEngine_Export(t *testing.T) {
 	// mock the planner so compactions don't run during the test
 	e.CompactionPlan = &mockPlanner{}
 
-	if err := e.Open(); err != nil {
+	if err := e.Open(context.Background()); err != nil {
 		t.Fatalf("failed to open tsm1 engine: %s", err.Error())
 	}
 
-	if err := e.WritePoints([]models.Point{p1}); err != nil {
+	if err := e.WritePoints(context.Background(), []models.Point{p1}); err != nil {
 		t.Fatalf("failed to write points: %s", err.Error())
 	}
 	if err := e.WriteSnapshot(); err != nil {
 		t.Fatalf("failed to snapshot: %s", err.Error())
 	}
 
-	if err := e.WritePoints([]models.Point{p2}); err != nil {
+	if err := e.WritePoints(context.Background(), []models.Point{p2}); err != nil {
 		t.Fatalf("failed to write points: %s", err.Error())
 	}
 	if err := e.WriteSnapshot(); err != nil {
 		t.Fatalf("failed to snapshot: %s", err.Error())
 	}
 
-	if err := e.WritePoints([]models.Point{p3}); err != nil {
+	if err := e.WritePoints(context.Background(), []models.Point{p3}); err != nil {
 		t.Fatalf("failed to write points: %s", err.Error())
 	}
 
@@ -748,7 +765,7 @@ func TestEngine_CreateIterator_Cache_Ascending(t *testing.T) {
 
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			e.MeasurementFields([]byte("cpu")).CreateFieldIfNotExists([]byte("value"), influxql.Float)
@@ -805,7 +822,7 @@ func TestEngine_CreateIterator_Cache_Descending(t *testing.T) {
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
 
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			e.MeasurementFields([]byte("cpu")).CreateFieldIfNotExists([]byte("value"), influxql.Float)
@@ -861,7 +878,7 @@ func TestEngine_CreateIterator_TSM_Ascending(t *testing.T) {
 
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			e.MeasurementFields([]byte("cpu")).CreateFieldIfNotExists([]byte("value"), influxql.Float)
@@ -919,7 +936,7 @@ func TestEngine_CreateIterator_TSM_Descending(t *testing.T) {
 
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			e.MeasurementFields([]byte("cpu")).CreateFieldIfNotExists([]byte("value"), influxql.Float)
@@ -977,7 +994,7 @@ func TestEngine_CreateIterator_Aux(t *testing.T) {
 
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			e.MeasurementFields([]byte("cpu")).CreateFieldIfNotExists([]byte("value"), influxql.Float)
@@ -1037,7 +1054,7 @@ func TestEngine_CreateIterator_Condition(t *testing.T) {
 
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			e.MeasurementFields([]byte("cpu")).CreateFieldIfNotExists([]byte("value"), influxql.Float)
@@ -1093,8 +1110,8 @@ func TestEngine_CreateIterator_Condition(t *testing.T) {
 
 // Test that series id set gets updated and returned appropriately.
 func TestIndex_SeriesIDSet(t *testing.T) {
-	test := func(index string) error {
-		engine := MustOpenEngine(index)
+	test := func(t *testing.T, index string) error {
+		engine := MustOpenEngine(t, index)
 		defer engine.Close()
 
 		// Add some series.
@@ -1131,7 +1148,7 @@ func TestIndex_SeriesIDSet(t *testing.T) {
 
 		// Drop all the series for the gpu measurement and they should no longer
 		// be in the series ID set.
-		if err := engine.DeleteMeasurement([]byte("gpu")); err != nil {
+		if err := engine.DeleteMeasurement(context.Background(), []byte("gpu")); err != nil {
 			return err
 		}
 
@@ -1145,7 +1162,7 @@ func TestIndex_SeriesIDSet(t *testing.T) {
 
 		// Drop the specific mem series
 		ditr := &seriesIterator{keys: [][]byte{[]byte("mem,host=z")}}
-		if err := engine.DeleteSeriesRange(ditr, math.MinInt64, math.MaxInt64); err != nil {
+		if err := engine.DeleteSeriesRange(context.Background(), ditr, math.MinInt64, math.MaxInt64); err != nil {
 			return err
 		}
 
@@ -1180,7 +1197,7 @@ func TestIndex_SeriesIDSet(t *testing.T) {
 
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
-			if err := test(index); err != nil {
+			if err := test(t, index); err != nil {
 				t.Error(err)
 			}
 		})
@@ -1197,14 +1214,14 @@ func TestEngine_DeleteSeries(t *testing.T) {
 			p2 := MustParsePointString("cpu,host=B value=1.2 2000000000")
 			p3 := MustParsePointString("cpu,host=A sum=1.3 3000000000")
 
-			e, err := NewEngine(index)
+			e, err := NewEngine(t, index)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			// mock the planner so compactions don't run during the test
 			e.CompactionPlan = &mockPlanner{}
-			if err := e.Open(); err != nil {
+			if err := e.Open(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			defer e.Close()
@@ -1222,7 +1239,7 @@ func TestEngine_DeleteSeries(t *testing.T) {
 			}
 
 			itr := &seriesIterator{keys: [][]byte{[]byte("cpu,host=A")}}
-			if err := e.DeleteSeriesRange(itr, math.MinInt64, math.MaxInt64); err != nil {
+			if err := e.DeleteSeriesRange(context.Background(), itr, math.MinInt64, math.MaxInt64); err != nil {
 				t.Fatalf("failed to delete series: %v", err)
 			}
 
@@ -1252,14 +1269,14 @@ func TestEngine_DeleteSeriesRange(t *testing.T) {
 			p7 := MustParsePointString("mem,host=C value=1.3 1000000000")  // Should not be deleted
 			p8 := MustParsePointString("disk,host=C value=1.3 1000000000") // Should not be deleted
 
-			e, err := NewEngine(index)
+			e, err := NewEngine(t, index)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			// mock the planner so compactions don't run during the test
 			e.CompactionPlan = &mockPlanner{}
-			if err := e.Open(); err != nil {
+			if err := e.Open(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			defer e.Close()
@@ -1270,7 +1287,7 @@ func TestEngine_DeleteSeriesRange(t *testing.T) {
 				}
 			}
 
-			if err := e.WritePoints([]models.Point{p1, p2, p3, p4, p5, p6, p7, p8}); err != nil {
+			if err := e.WritePoints(context.Background(), []models.Point{p1, p2, p3, p4, p5, p6, p7, p8}); err != nil {
 				t.Fatalf("failed to write points: %s", err.Error())
 			}
 			if err := e.WriteSnapshot(); err != nil {
@@ -1283,7 +1300,7 @@ func TestEngine_DeleteSeriesRange(t *testing.T) {
 			}
 
 			itr := &seriesIterator{keys: [][]byte{[]byte("cpu,host=0"), []byte("cpu,host=A"), []byte("cpu,host=B"), []byte("cpu,host=C")}}
-			if err := e.DeleteSeriesRange(itr, 0, 3000000000); err != nil {
+			if err := e.DeleteSeriesRange(context.Background(), itr, 0, 3000000000); err != nil {
 				t.Fatalf("failed to delete series: %v", err)
 			}
 
@@ -1326,7 +1343,7 @@ func TestEngine_DeleteSeriesRange(t *testing.T) {
 
 			// Deleting remaining series should remove them from the series.
 			itr = &seriesIterator{keys: [][]byte{[]byte("cpu,host=0"), []byte("cpu,host=B")}}
-			if err := e.DeleteSeriesRange(itr, 0, 9000000000); err != nil {
+			if err := e.DeleteSeriesRange(context.Background(), itr, 0, 9000000000); err != nil {
 				t.Fatalf("failed to delete series: %v", err)
 			}
 
@@ -1362,14 +1379,14 @@ func TestEngine_DeleteSeriesRangeWithPredicate(t *testing.T) {
 			p7 := MustParsePointString("mem,host=C value=1.3 1000000000")
 			p8 := MustParsePointString("disk,host=C value=1.3 1000000000") // Should not be deleted
 
-			e, err := NewEngine(index)
+			e, err := NewEngine(t, index)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			// mock the planner so compactions don't run during the test
 			e.CompactionPlan = &mockPlanner{}
-			if err := e.Open(); err != nil {
+			if err := e.Open(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			defer e.Close()
@@ -1380,7 +1397,7 @@ func TestEngine_DeleteSeriesRangeWithPredicate(t *testing.T) {
 				}
 			}
 
-			if err := e.WritePoints([]models.Point{p1, p2, p3, p4, p5, p6, p7, p8}); err != nil {
+			if err := e.WritePoints(context.Background(), []models.Point{p1, p2, p3, p4, p5, p6, p7, p8}); err != nil {
 				t.Fatalf("failed to write points: %s", err.Error())
 			}
 			if err := e.WriteSnapshot(); err != nil {
@@ -1406,7 +1423,7 @@ func TestEngine_DeleteSeriesRangeWithPredicate(t *testing.T) {
 				}
 				return math.MinInt64, math.MaxInt64, false
 			}
-			if err := e.DeleteSeriesRangeWithPredicate(itr, predicate); err != nil {
+			if err := e.DeleteSeriesRangeWithPredicate(context.Background(), itr, predicate); err != nil {
 				t.Fatalf("failed to delete series: %v", err)
 			}
 
@@ -1451,7 +1468,7 @@ func TestEngine_DeleteSeriesRangeWithPredicate(t *testing.T) {
 
 			// Deleting remaining series should remove them from the series.
 			itr = &seriesIterator{keys: [][]byte{[]byte("cpu,host=A"), []byte("cpu,host=C")}}
-			if err := e.DeleteSeriesRange(itr, 0, 9000000000); err != nil {
+			if err := e.DeleteSeriesRange(context.Background(), itr, 0, 9000000000); err != nil {
 				t.Fatalf("failed to delete series: %v", err)
 			}
 
@@ -1488,14 +1505,14 @@ func TestEngine_DeleteSeriesRangeWithPredicate_Nil(t *testing.T) {
 			p7 := MustParsePointString("mem,host=C value=1.3 1000000000")
 			p8 := MustParsePointString("disk,host=C value=1.3 1000000000") // Should not be deleted
 
-			e, err := NewEngine(index)
+			e, err := NewEngine(t, index)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			// mock the planner so compactions don't run during the test
 			e.CompactionPlan = &mockPlanner{}
-			if err := e.Open(); err != nil {
+			if err := e.Open(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			defer e.Close()
@@ -1506,7 +1523,7 @@ func TestEngine_DeleteSeriesRangeWithPredicate_Nil(t *testing.T) {
 				}
 			}
 
-			if err := e.WritePoints([]models.Point{p1, p2, p3, p4, p5, p6, p7, p8}); err != nil {
+			if err := e.WritePoints(context.Background(), []models.Point{p1, p2, p3, p4, p5, p6, p7, p8}); err != nil {
 				t.Fatalf("failed to write points: %s", err.Error())
 			}
 			if err := e.WriteSnapshot(); err != nil {
@@ -1519,7 +1536,7 @@ func TestEngine_DeleteSeriesRangeWithPredicate_Nil(t *testing.T) {
 			}
 
 			itr := &seriesIterator{keys: [][]byte{[]byte("cpu,host=A"), []byte("cpu,host=B"), []byte("cpu,host=C"), []byte("mem,host=B"), []byte("mem,host=C")}}
-			if err := e.DeleteSeriesRangeWithPredicate(itr, nil); err != nil {
+			if err := e.DeleteSeriesRangeWithPredicate(context.Background(), itr, nil); err != nil {
 				t.Fatalf("failed to delete series: %v", err)
 			}
 
@@ -1574,14 +1591,14 @@ func TestEngine_DeleteSeriesRangeWithPredicate_FlushBatch(t *testing.T) {
 			p7 := MustParsePointString("mem,host=C value=1.3 1000000000")
 			p8 := MustParsePointString("disk,host=C value=1.3 1000000000") // Should not be deleted
 
-			e, err := NewEngine(index)
+			e, err := NewEngine(t, index)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			// mock the planner so compactions don't run during the test
 			e.CompactionPlan = &mockPlanner{}
-			if err := e.Open(); err != nil {
+			if err := e.Open(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			defer e.Close()
@@ -1592,7 +1609,7 @@ func TestEngine_DeleteSeriesRangeWithPredicate_FlushBatch(t *testing.T) {
 				}
 			}
 
-			if err := e.WritePoints([]models.Point{p1, p2, p3, p4, p5, p6, p7, p8}); err != nil {
+			if err := e.WritePoints(context.Background(), []models.Point{p1, p2, p3, p4, p5, p6, p7, p8}); err != nil {
 				t.Fatalf("failed to write points: %s", err.Error())
 			}
 			if err := e.WriteSnapshot(); err != nil {
@@ -1619,7 +1636,7 @@ func TestEngine_DeleteSeriesRangeWithPredicate_FlushBatch(t *testing.T) {
 				}
 				return math.MinInt64, math.MaxInt64, false
 			}
-			if err := e.DeleteSeriesRangeWithPredicate(itr, predicate); err != nil {
+			if err := e.DeleteSeriesRangeWithPredicate(context.Background(), itr, predicate); err != nil {
 				t.Fatalf("failed to delete series: %v", err)
 			}
 
@@ -1664,7 +1681,7 @@ func TestEngine_DeleteSeriesRangeWithPredicate_FlushBatch(t *testing.T) {
 
 			// Deleting remaining series should remove them from the series.
 			itr = &seriesIterator{keys: [][]byte{[]byte("cpu,host=A"), []byte("cpu,host=C")}}
-			if err := e.DeleteSeriesRange(itr, 0, 9000000000); err != nil {
+			if err := e.DeleteSeriesRange(context.Background(), itr, 0, 9000000000); err != nil {
 				t.Fatalf("failed to delete series: %v", err)
 			}
 
@@ -1693,14 +1710,14 @@ func TestEngine_DeleteSeriesRange_OutsideTime(t *testing.T) {
 			// Create a few points.
 			p1 := MustParsePointString("cpu,host=A value=1.1 1000000000") // Should not be deleted
 
-			e, err := NewEngine(index)
+			e, err := NewEngine(t, index)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			// mock the planner so compactions don't run during the test
 			e.CompactionPlan = &mockPlanner{}
-			if err := e.Open(); err != nil {
+			if err := e.Open(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			defer e.Close()
@@ -1711,7 +1728,7 @@ func TestEngine_DeleteSeriesRange_OutsideTime(t *testing.T) {
 				}
 			}
 
-			if err := e.WritePoints([]models.Point{p1}); err != nil {
+			if err := e.WritePoints(context.Background(), []models.Point{p1}); err != nil {
 				t.Fatalf("failed to write points: %s", err.Error())
 			}
 			if err := e.WriteSnapshot(); err != nil {
@@ -1724,7 +1741,7 @@ func TestEngine_DeleteSeriesRange_OutsideTime(t *testing.T) {
 			}
 
 			itr := &seriesIterator{keys: [][]byte{[]byte("cpu,host=A")}}
-			if err := e.DeleteSeriesRange(itr, 0, 0); err != nil {
+			if err := e.DeleteSeriesRange(context.Background(), itr, 0, 0); err != nil {
 				t.Fatalf("failed to delete series: %v", err)
 			}
 
@@ -1774,53 +1791,36 @@ func TestEngine_LastModified(t *testing.T) {
 			p2 := MustParsePointString("cpu,host=B value=1.2 2000000000")
 			p3 := MustParsePointString("cpu,host=A sum=1.3 3000000000")
 
-			e, err := NewEngine(index)
-			if err != nil {
-				t.Fatal(err)
-			}
+			e, err := NewEngine(t, index)
+			require.NoError(t, err)
 
 			// mock the planner so compactions don't run during the test
 			e.CompactionPlan = &mockPlanner{}
 			e.SetEnabled(false)
-			if err := e.Open(); err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, e.Open(context.Background()))
 			defer e.Close()
 
-			if err := e.writePoints(p1, p2, p3); err != nil {
-				t.Fatalf("failed to write points: %s", err.Error())
-			}
-
+			require.NoError(t, e.writePoints(p1, p2, p3))
 			lm := e.LastModified()
-			if lm.IsZero() {
-				t.Fatalf("expected non-zero time, got %v", lm.UTC())
-			}
+			require.Falsef(t, lm.IsZero(), "expected non-zero time, got %v", lm.UTC())
 			e.SetEnabled(true)
 
 			// Artificial sleep added due to filesystems caching the mod time
 			// of files.  This prevents the WAL last modified time from being
 			// returned and newer than the filestore's mod time.
-			time.Sleep(2 * time.Second) // Covers most filesystems.
+			time.Sleep(time.Second) // Covers most filesystems.
 
-			if err := e.WriteSnapshot(); err != nil {
-				t.Fatalf("failed to snapshot: %s", err.Error())
-			}
-
+			require.NoError(t, e.WriteSnapshot())
 			lm2 := e.LastModified()
+			require.NotEqual(t, lm, lm2)
 
-			if got, exp := lm.Equal(lm2), false; exp != got {
-				t.Fatalf("expected time change, got %v, exp %v: %s == %s", got, exp, lm.String(), lm2.String())
-			}
+			// Another arbitrary sleep.
+			time.Sleep(time.Second)
 
 			itr := &seriesIterator{keys: [][]byte{[]byte("cpu,host=A")}}
-			if err := e.DeleteSeriesRange(itr, math.MinInt64, math.MaxInt64); err != nil {
-				t.Fatalf("failed to delete series: %v", err)
-			}
-
+			require.NoError(t, e.DeleteSeriesRange(context.Background(), itr, math.MinInt64, math.MaxInt64))
 			lm3 := e.LastModified()
-			if got, exp := lm2.Equal(lm3), false; exp != got {
-				t.Fatalf("expected time change, got %v, exp %v", got, exp)
-			}
+			require.NotEqual(t, lm2, lm3)
 		})
 	}
 }
@@ -1830,7 +1830,7 @@ func TestEngine_SnapshotsDisabled(t *testing.T) {
 	defer sfile.Close()
 
 	// Generate temporary file.
-	dir, _ := ioutil.TempDir("", "tsm")
+	dir, _ := os.MkdirTemp("", "tsm")
 	walPath := filepath.Join(dir, "wal")
 	os.MkdirAll(walPath, 0777)
 	defer os.RemoveAll(dir)
@@ -1847,7 +1847,7 @@ func TestEngine_SnapshotsDisabled(t *testing.T) {
 	e.CompactionPlan = &mockPlanner{}
 
 	e.SetEnabled(false)
-	if err := e.Open(); err != nil {
+	if err := e.Open(context.Background()); err != nil {
 		t.Fatalf("failed to open tsm1 engine: %s", err.Error())
 	}
 
@@ -1865,7 +1865,7 @@ func TestEngine_SnapshotsDisabled(t *testing.T) {
 func TestEngine_ShouldCompactCache(t *testing.T) {
 	nowTime := time.Now()
 
-	e, err := NewEngine(tsi1.IndexName)
+	e, err := NewEngine(t, tsi1.IndexName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1874,7 +1874,7 @@ func TestEngine_ShouldCompactCache(t *testing.T) {
 	// mock the planner so compactions don't run during the test
 	e.CompactionPlan = &mockPlanner{}
 	e.SetEnabled(false)
-	if err := e.Open(); err != nil {
+	if err := e.Open(context.Background()); err != nil {
 		t.Fatalf("failed to open tsm1 engine: %s", err.Error())
 	}
 
@@ -1910,7 +1910,7 @@ func TestEngine_CreateCursor_Ascending(t *testing.T) {
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
 
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			e.MeasurementFields([]byte("cpu")).CreateFieldIfNotExists([]byte("value"), influxql.Float)
@@ -1944,7 +1944,7 @@ func TestEngine_CreateCursor_Ascending(t *testing.T) {
 				Field:     "value",
 				Ascending: true,
 				StartTime: 2,
-				EndTime:   12,
+				EndTime:   11,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -1970,7 +1970,7 @@ func TestEngine_CreateCursor_Descending(t *testing.T) {
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
 
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			e.MeasurementFields([]byte("cpu")).CreateFieldIfNotExists([]byte("value"), influxql.Float)
@@ -2004,7 +2004,7 @@ func TestEngine_CreateCursor_Descending(t *testing.T) {
 				Field:     "value",
 				Ascending: false,
 				StartTime: 1,
-				EndTime:   11,
+				EndTime:   10,
 			})
 			if err != nil {
 				t.Fatal(err)
@@ -2019,6 +2019,80 @@ func TestEngine_CreateCursor_Descending(t *testing.T) {
 			if !cmp.Equal([]float64{10.1, 1.3, 1.2, 1.1}, a.Values) {
 				t.Fatal("unexpect values")
 			}
+		})
+	}
+}
+
+// Ensure engine can create an descending iterator for cached values.
+func TestEngine_CreateIterator_SeriesKey(t *testing.T) {
+	t.Parallel()
+
+	for _, index := range tsdb.RegisteredIndexes() {
+		t.Run(index, func(t *testing.T) {
+			assert := tassert.New(t)
+			e := MustOpenEngine(t, index)
+			defer e.Close()
+
+			e.MeasurementFields([]byte("cpu")).CreateFieldIfNotExists([]byte("value"), influxql.Float)
+			e.CreateSeriesIfNotExists([]byte("cpu,host=A,region=east"), []byte("cpu"), models.NewTags(map[string]string{"host": "A", "region": "east"}))
+			e.CreateSeriesIfNotExists([]byte("cpu,host=B,region=east"), []byte("cpu"), models.NewTags(map[string]string{"host": "B", "region": "east"}))
+			e.CreateSeriesIfNotExists([]byte("cpu,host=C,region=east"), []byte("cpu"), models.NewTags(map[string]string{"host": "C", "region": "east"}))
+			e.CreateSeriesIfNotExists([]byte("cpu,host=A,region=west"), []byte("cpu"), models.NewTags(map[string]string{"host": "A", "region": "west"}))
+
+			if err := e.WritePointsString(
+				`cpu,host=A,region=east value=1.1 1000000001`,
+				`cpu,host=B,region=east value=1.2 1000000002`,
+				`cpu,host=A,region=east value=1.3 1000000003`,
+				`cpu,host=C,region=east value=1.4 1000000004`,
+				`cpu,host=A,region=west value=1.5 1000000005`,
+			); err != nil {
+				t.Fatalf("failed to write points: %s", err.Error())
+			}
+
+			opts := query.IteratorOptions{
+				Expr:       influxql.MustParseExpr(`_seriesKey`),
+				Dimensions: []string{},
+				StartTime:  influxql.MinTime,
+				EndTime:    influxql.MaxTime,
+				Condition:  influxql.MustParseExpr(`host = 'A'`),
+			}
+
+			itr, err := e.CreateIterator(context.Background(), "cpu", opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			stringItr, ok := itr.(query.StringIterator)
+			assert.True(ok, "series iterator must be of type string")
+			expectedSeries := map[string]struct{}{
+				"cpu,host=A,region=west": struct{}{},
+				"cpu,host=A,region=east": struct{}{},
+			}
+			var str *query.StringPoint
+			for str, err = stringItr.Next(); err == nil && str != (*query.StringPoint)(nil); str, err = stringItr.Next() {
+				_, ok := expectedSeries[str.Value]
+				assert.True(ok, "Saw bad key "+str.Value)
+				delete(expectedSeries, str.Value)
+			}
+			assert.NoError(err)
+			assert.NoError(itr.Close())
+
+			countOpts := opts
+			countOpts.Expr = influxql.MustParseExpr(`count(_seriesKey)`)
+			itr, err = e.CreateIterator(context.Background(), "cpu", countOpts)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			integerIter, ok := itr.(query.IntegerIterator)
+			assert.True(ok, "series count iterator must be of type integer")
+			i, err := integerIter.Next()
+			assert.NoError(err)
+			assert.Equal(int64(2), i.Value, "must count 2 series with host=A")
+			i, err = integerIter.Next()
+			assert.NoError(err)
+			assert.Equal((*query.IntegerPoint)(nil), i, "count iterator has only one output")
+			assert.NoError(itr.Close())
 		})
 	}
 }
@@ -2052,7 +2126,7 @@ func TestEngine_DisableEnableCompactions_Concurrent(t *testing.T) {
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
 
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			var wg sync.WaitGroup
@@ -2097,7 +2171,7 @@ func TestEngine_WritePoints_TypeConflict(t *testing.T) {
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
 
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			if err := e.WritePointsString(
@@ -2133,7 +2207,7 @@ func TestEngine_WritePoints_Reload(t *testing.T) {
 	for _, index := range tsdb.RegisteredIndexes() {
 		t.Run(index, func(t *testing.T) {
 
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(t, index)
 			defer e.Close()
 
 			if err := e.WritePointsString(
@@ -2176,14 +2250,14 @@ func TestEngine_Invalid_UTF8(t *testing.T) {
 			field := []byte{255, 110, 101, 116}    // A known invalid UTF-8 string
 			p := MustParsePointString(fmt.Sprintf("%s,host=A %s=1.1 6000000000", name, field))
 
-			e, err := NewEngine(index)
+			e, err := NewEngine(t, index)
 			if err != nil {
 				t.Fatal(err)
 			}
 
 			// mock the planner so compactions don't run during the test
 			e.CompactionPlan = &mockPlanner{}
-			if err := e.Open(); err != nil {
+			if err := e.Open(context.Background()); err != nil {
 				t.Fatal(err)
 			}
 			defer e.Close()
@@ -2192,7 +2266,7 @@ func TestEngine_Invalid_UTF8(t *testing.T) {
 				t.Fatalf("create series index error: %v", err)
 			}
 
-			if err := e.WritePoints([]models.Point{p}); err != nil {
+			if err := e.WritePoints(context.Background(), []models.Point{p}); err != nil {
 				t.Fatalf("failed to write points: %s", err.Error())
 			}
 
@@ -2207,7 +2281,7 @@ func BenchmarkEngine_WritePoints(b *testing.B) {
 	batchSizes := []int{10, 100, 1000, 5000, 10000}
 	for _, sz := range batchSizes {
 		for _, index := range tsdb.RegisteredIndexes() {
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(b, index)
 			e.MeasurementFields([]byte("cpu")).CreateFieldIfNotExists([]byte("value"), influxql.Float)
 			pp := make([]models.Point, 0, sz)
 			for i := 0; i < sz; i++ {
@@ -2218,7 +2292,7 @@ func BenchmarkEngine_WritePoints(b *testing.B) {
 			b.Run(fmt.Sprintf("%s_%d", index, sz), func(b *testing.B) {
 				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
-					err := e.WritePoints(pp)
+					err := e.WritePoints(context.Background(), pp)
 					if err != nil {
 						b.Fatal(err)
 					}
@@ -2233,7 +2307,7 @@ func BenchmarkEngine_WritePoints_Parallel(b *testing.B) {
 	batchSizes := []int{1000, 5000, 10000, 25000, 50000, 75000, 100000, 200000}
 	for _, sz := range batchSizes {
 		for _, index := range tsdb.RegisteredIndexes() {
-			e := MustOpenEngine(index)
+			e := MustOpenEngine(b, index)
 			e.MeasurementFields([]byte("cpu")).CreateFieldIfNotExists([]byte("value"), influxql.Float)
 
 			cpus := runtime.GOMAXPROCS(0)
@@ -2253,7 +2327,7 @@ func BenchmarkEngine_WritePoints_Parallel(b *testing.B) {
 						go func(i int) {
 							defer wg.Done()
 							from, to := i*sz, (i+1)*sz
-							err := e.WritePoints(pp[from:to])
+							err := e.WritePoints(context.Background(), pp[from:to])
 							if err != nil {
 								errC <- err
 								return
@@ -2412,7 +2486,7 @@ var benchmarkVariants = []struct {
 func BenchmarkEngine_CreateIterator(b *testing.B) {
 	engines := make([]*benchmarkEngine, len(sizes))
 	for i, size := range sizes {
-		engines[i] = MustInitDefaultBenchmarkEngine(size.name, size.sz)
+		engines[i] = MustInitDefaultBenchmarkEngine(b, size.name, size.sz)
 	}
 
 	for _, tt := range benchmarks {
@@ -2458,13 +2532,13 @@ var (
 // MustInitDefaultBenchmarkEngine creates a new engine using the default index
 // and fills it with points.  Reuses previous engine if the same parameters
 // were used.
-func MustInitDefaultBenchmarkEngine(name string, pointN int) *benchmarkEngine {
+func MustInitDefaultBenchmarkEngine(tb testing.TB, name string, pointN int) *benchmarkEngine {
 	const batchSize = 1000
 	if pointN%batchSize != 0 {
 		panic(fmt.Sprintf("point count (%d) must be a multiple of batch size (%d)", pointN, batchSize))
 	}
 
-	e := MustOpenEngine(tsdb.DefaultIndex)
+	e := MustOpenEngine(tb, tsdb.DefaultIndex)
 
 	// Initialize metadata.
 	e.MeasurementFields([]byte("cpu")).CreateFieldIfNotExists([]byte("value"), influxql.Float)
@@ -2516,8 +2590,10 @@ type Engine struct {
 }
 
 // NewEngine returns a new instance of Engine at a temporary location.
-func NewEngine(index string) (*Engine, error) {
-	root, err := ioutil.TempDir("", "tsm1-")
+func NewEngine(tb testing.TB, index string) (*Engine, error) {
+	tb.Helper()
+
+	root, err := os.MkdirTemp("", "tsm1-")
 	if err != nil {
 		panic(err)
 	}
@@ -2531,7 +2607,7 @@ func NewEngine(index string) (*Engine, error) {
 
 	// Setup series file.
 	sfile := tsdb.NewSeriesFile(filepath.Join(dbPath, tsdb.SeriesFileDirectory))
-	sfile.Logger = logger.New(os.Stdout)
+	sfile.Logger = zaptest.NewLogger(tb)
 	if err = sfile.Open(); err != nil {
 		return nil, err
 	}
@@ -2559,13 +2635,15 @@ func NewEngine(index string) (*Engine, error) {
 }
 
 // MustOpenEngine returns a new, open instance of Engine.
-func MustOpenEngine(index string) *Engine {
-	e, err := NewEngine(index)
+func MustOpenEngine(tb testing.TB, index string) *Engine {
+	tb.Helper()
+
+	e, err := NewEngine(tb, index)
 	if err != nil {
 		panic(err)
 	}
 
-	if err := e.Open(); err != nil {
+	if err := e.Open(context.Background()); err != nil {
 		panic(err)
 	}
 	return e
@@ -2620,7 +2698,7 @@ func (e *Engine) Reopen() error {
 	e.Engine = tsm1.NewEngine(1, e.index, filepath.Join(e.root, "data"), filepath.Join(e.root, "wal"), e.sfile, opt).(*tsm1.Engine)
 
 	// Reopen engine
-	if err := e.Engine.Open(); err != nil {
+	if err := e.Engine.Open(context.Background()); err != nil {
 		return err
 	}
 
@@ -2665,7 +2743,7 @@ func (e *Engine) writePoints(points ...models.Point) error {
 		}
 	}
 	// Write the points into the cache/wal.
-	return e.WritePoints(points)
+	return e.WritePoints(context.Background(), points)
 }
 
 // MustAddSeries calls AddSeries, panicking if there is an error.
@@ -2689,7 +2767,7 @@ type SeriesFile struct {
 
 // NewSeriesFile returns a new instance of SeriesFile with a temporary file path.
 func NewSeriesFile() *SeriesFile {
-	dir, err := ioutil.TempDir("", "tsdb-series-file-")
+	dir, err := os.MkdirTemp("", "tsdb-series-file-")
 	if err != nil {
 		panic(err)
 	}
@@ -2727,13 +2805,13 @@ func MustParsePointString(buf string) models.Point { return MustParsePointsStrin
 
 type mockPlanner struct{}
 
-func (m *mockPlanner) Plan(lastWrite time.Time) []tsm1.CompactionGroup { return nil }
-func (m *mockPlanner) PlanLevel(level int) []tsm1.CompactionGroup      { return nil }
-func (m *mockPlanner) PlanOptimize() []tsm1.CompactionGroup            { return nil }
-func (m *mockPlanner) Release(groups []tsm1.CompactionGroup)           {}
-func (m *mockPlanner) FullyCompacted() bool                            { return false }
-func (m *mockPlanner) ForceFull()                                      {}
-func (m *mockPlanner) SetFileStore(fs *tsm1.FileStore)                 {}
+func (m *mockPlanner) Plan(lastWrite time.Time) ([]tsm1.CompactionGroup, int64) { return nil, 0 }
+func (m *mockPlanner) PlanLevel(level int) ([]tsm1.CompactionGroup, int64)      { return nil, 0 }
+func (m *mockPlanner) PlanOptimize() ([]tsm1.CompactionGroup, int64)            { return nil, 0 }
+func (m *mockPlanner) Release(groups []tsm1.CompactionGroup)                    {}
+func (m *mockPlanner) FullyCompacted() (bool, string)                           { return false, "not compacted" }
+func (m *mockPlanner) ForceFull()                                               {}
+func (m *mockPlanner) SetFileStore(fs *tsm1.FileStore)                          {}
 
 // ParseTags returns an instance of Tags for a comma-delimited list of key/values.
 func ParseTags(s string) query.Tags {

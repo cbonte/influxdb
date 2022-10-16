@@ -1,8 +1,8 @@
 package tsdb
 
 import (
+	"context"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,18 +13,50 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/influxdata/influxdb/v2/logger"
 	"github.com/influxdata/influxdb/v2/models"
 	"github.com/influxdata/influxql"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
 )
+
+func TestShard_ErrorPrinting(t *testing.T) {
+
+	tests := []struct {
+		nSeq int
+		raw  string
+	}{
+		{1, string([]byte{'b', 'e', 'n', 't', 'e', 's', 't', '\t', '\n'})},
+		{1, string([]byte{'b', 'e', 'n', 't', 'e', 's', 0, 0, 0xFE, 0, 0xFE, 't'})},
+		{2, string([]byte{0, 0, 0, 0, 0xFE, '\t', '\n', '\t', 'b', 'e', 'n', 't', 'e', 's', 't', 0, 0, 0, 0, 0xFE, '\t', '\n', '\t', '\t', '\t'})},
+	}
+
+	for i := range tests {
+		f := makePrintable(tests[i].raw)
+		require.True(t, models.ValidToken([]byte(f)))
+		c := 0
+		nSeq := 0
+		for _, r := range f {
+			if r == unPrintReplRune {
+				c++
+				if c == 1 {
+					nSeq++
+				}
+				require.LessOrEqual(t, c, unPrintMaxReplRune, "too many repeated %c", unPrintReplRune)
+			} else {
+				c = 0
+			}
+		}
+		require.Equalf(t, tests[i].nSeq, nSeq, "wrong number of elided sequences of replacement characters")
+	}
+}
 
 func TestShard_MapType(t *testing.T) {
 	var sh *TempShard
 
 	setup := func(index string) {
-		sh = NewTempShard(index)
+		sh = NewTempShard(t, index)
 
-		if err := sh.Open(); err != nil {
+		if err := sh.Open(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -155,8 +187,8 @@ _reserved,region=uswest value="foo" 0
 func TestShard_MeasurementsByRegex(t *testing.T) {
 	var sh *TempShard
 	setup := func(index string) {
-		sh = NewTempShard(index)
-		if err := sh.Open(); err != nil {
+		sh = NewTempShard(t, index)
+		if err := sh.Open(context.Background()); err != nil {
 			t.Fatal(err)
 		}
 
@@ -203,6 +235,125 @@ mem,host=serverB value=50i,val3=t 10
 	}
 }
 
+func TestShard_MeasurementOptimization(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		expr  influxql.Expr
+		name  string
+		ok    bool
+		names [][]byte
+	}{
+		{
+			expr:  influxql.MustParseExpr(`_name = 'm0'`),
+			name:  "single measurement",
+			ok:    true,
+			names: [][]byte{[]byte("m0")},
+		},
+		{
+			expr:  influxql.MustParseExpr(`_something = 'f' AND _name = 'm0'`),
+			name:  "single measurement with AND",
+			ok:    true,
+			names: [][]byte{[]byte("m0")},
+		},
+		{
+			expr:  influxql.MustParseExpr(`_something = 'f' AND (a =~ /x0/ AND _name = 'm0')`),
+			name:  "single measurement with multiple AND",
+			ok:    true,
+			names: [][]byte{[]byte("m0")},
+		},
+		{
+			expr:  influxql.MustParseExpr(`_name = 'm0' OR _name = 'm1' OR _name = 'm2'`),
+			name:  "multiple measurements alone",
+			ok:    true,
+			names: [][]byte{[]byte("m0"), []byte("m1"), []byte("m2")},
+		},
+		{
+			expr:  influxql.MustParseExpr(`(_name = 'm0' OR _name = 'm1' OR _name = 'm2') AND (_field = 'foo' OR _field = 'bar' OR _field = 'qux')`),
+			name:  "multiple measurements combined",
+			ok:    true,
+			names: [][]byte{[]byte("m0"), []byte("m1"), []byte("m2")},
+		},
+		{
+			expr:  influxql.MustParseExpr(`(_name = 'm0' OR (_name = 'm1' OR _name = 'm2')) AND tag1 != 'foo'`),
+			name:  "parens in expression",
+			ok:    true,
+			names: [][]byte{[]byte("m0"), []byte("m1"), []byte("m2")},
+		},
+		{
+			expr:  influxql.MustParseExpr(`(tag1 != 'foo' OR tag2 = 'bar') AND (_name = 'm0' OR _name = 'm1' OR _name = 'm2') AND (_field = 'val1' OR _field = 'val2')`),
+			name:  "multiple AND",
+			ok:    true,
+			names: [][]byte{[]byte("m0"), []byte("m1"), []byte("m2")},
+		},
+		{
+			expr:  influxql.MustParseExpr(`(_name = 'm0' OR _name = 'm1' OR _name = 'm2') AND (tag1 != 'foo' OR _name = 'm1')`),
+			name:  "measurements on in multiple groups, only one valid group",
+			ok:    true,
+			names: [][]byte{[]byte("m0"), []byte("m1"), []byte("m2")},
+		},
+		{
+			expr:  influxql.MustParseExpr(`_name = 'm0' OR tag1 != 'foo'`),
+			name:  "single measurement with OR",
+			ok:    false,
+			names: nil,
+		},
+		{
+			expr:  influxql.MustParseExpr(`_name = 'm0' OR true`),
+			name:  "measurement with OR boolean literal",
+			ok:    false,
+			names: nil,
+		},
+		{
+			expr:  influxql.MustParseExpr(`_name != 'm0' AND tag1 != 'foo'`),
+			name:  "single measurement with non-equal",
+			ok:    false,
+			names: nil,
+		},
+		{
+			expr:  influxql.MustParseExpr(`(_name = 'm0' OR _name != 'm1' OR _name = 'm2') AND (_field = 'foo' OR _field = 'bar' OR _field = 'qux')`),
+			name:  "multiple measurements with non-equal",
+			ok:    false,
+			names: nil,
+		},
+		{
+			expr:  influxql.MustParseExpr(`tag1 = 'foo' AND tag2 = 'bar'`),
+			name:  "no measurements - multiple tags",
+			ok:    false,
+			names: nil,
+		},
+		{
+			expr:  influxql.MustParseExpr(`_field = 'foo'`),
+			name:  "no measurements - single field",
+			ok:    false,
+			names: nil,
+		},
+		{
+			expr:  influxql.MustParseExpr(`(_name = 'm0' OR _name = 'm1' AND _name = 'm2') AND tag1 != 'foo'`),
+			name:  "measurements with AND",
+			ok:    false,
+			names: nil,
+		},
+		{
+			expr:  influxql.MustParseExpr(`(_name = 'm0' OR _name = 'm1' OR _name = 'm2') OR (tag1 != 'foo' OR _name = 'm1')`),
+			name:  "top level is not AND",
+			ok:    false,
+			names: nil,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			names, ok := measurementOptimization(tc.expr, measurementKey)
+			require.Equal(t, tc.names, names)
+			require.Equal(t, tc.ok, ok)
+		})
+	}
+}
+
 // TempShard represents a test wrapper for Shard that uses temporary
 // filesystem paths.
 type TempShard struct {
@@ -212,16 +363,18 @@ type TempShard struct {
 }
 
 // NewTempShard returns a new instance of TempShard with temp paths.
-func NewTempShard(index string) *TempShard {
+func NewTempShard(tb testing.TB, index string) *TempShard {
+	tb.Helper()
+
 	// Create temporary path for data and WAL.
-	dir, err := ioutil.TempDir("", "influxdb-tsdb-")
+	dir, err := os.MkdirTemp("", "influxdb-tsdb-")
 	if err != nil {
 		panic(err)
 	}
 
 	// Create series file.
 	sfile := NewSeriesFile(filepath.Join(dir, "db0", SeriesFileDirectory))
-	sfile.Logger = logger.New(os.Stdout)
+	sfile.Logger = zaptest.NewLogger(tb)
 	if err := sfile.Open(); err != nil {
 		panic(err)
 	}
@@ -258,7 +411,7 @@ func (sh *TempShard) MustWritePointsString(s string) {
 		panic(err)
 	}
 
-	if err := sh.WritePoints(a); err != nil {
+	if err := sh.WritePoints(context.Background(), a); err != nil {
 		panic(err)
 	}
 }

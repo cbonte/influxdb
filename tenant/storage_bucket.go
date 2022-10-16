@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/kv"
 )
 
@@ -13,23 +15,23 @@ var (
 	bucketIndex  = []byte("bucketindexv1")
 )
 
-func bucketIndexKey(o influxdb.ID, name string) ([]byte, error) {
+func bucketIndexKey(o platform.ID, name string) ([]byte, error) {
 	orgID, err := o.Encode()
 
 	if err != nil {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Err:  err,
 		}
 	}
-	k := make([]byte, influxdb.IDLength+len(name))
+	k := make([]byte, platform.IDLength+len(name))
 	copy(k, orgID)
-	copy(k[influxdb.IDLength:], name)
+	copy(k[platform.IDLength:], name)
 	return k, nil
 }
 
 // uniqueBucketName ensures this bucket is unique for this organization
-func (s *Store) uniqueBucketName(ctx context.Context, tx kv.Tx, oid influxdb.ID, uname string) error {
+func (s *Store) uniqueBucketName(ctx context.Context, tx kv.Tx, oid platform.ID, uname string) error {
 	key, err := bucketIndexKey(oid, uname)
 	if err != nil {
 		return err
@@ -76,7 +78,7 @@ func marshalBucket(u *influxdb.Bucket) ([]byte, error) {
 	return v, nil
 }
 
-func (s *Store) GetBucket(ctx context.Context, tx kv.Tx, id influxdb.ID) (*influxdb.Bucket, error) {
+func (s *Store) GetBucket(ctx context.Context, tx kv.Tx, id platform.ID) (*influxdb.Bucket, error) {
 	encodedID, err := id.Encode()
 	if err != nil {
 		return nil, InvalidOrgIDError(err)
@@ -99,11 +101,11 @@ func (s *Store) GetBucket(ctx context.Context, tx kv.Tx, id influxdb.ID) (*influ
 	return unmarshalBucket(v)
 }
 
-func (s *Store) GetBucketByName(ctx context.Context, tx kv.Tx, orgID influxdb.ID, n string) (*influxdb.Bucket, error) {
+func (s *Store) GetBucketByName(ctx context.Context, tx kv.Tx, orgID platform.ID, n string) (*influxdb.Bucket, error) {
 	key, err := bucketIndexKey(orgID, n)
 	if err != nil {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Err:  err,
 		}
 	}
@@ -124,9 +126,9 @@ func (s *Store) GetBucketByName(ctx context.Context, tx kv.Tx, orgID influxdb.ID
 		return nil, err
 	}
 
-	var id influxdb.ID
+	var id platform.ID
 	if err := id.Decode(buf); err != nil {
-		return nil, &influxdb.Error{
+		return nil, &errors.Error{
 			Err: err,
 		}
 	}
@@ -135,7 +137,7 @@ func (s *Store) GetBucketByName(ctx context.Context, tx kv.Tx, orgID influxdb.ID
 
 type BucketFilter struct {
 	Name           *string
-	OrganizationID *influxdb.ID
+	OrganizationID *platform.ID
 }
 
 func (s *Store) ListBuckets(ctx context.Context, tx kv.Tx, filter BucketFilter, opt ...influxdb.FindOptions) ([]*influxdb.Bucket, error) {
@@ -144,16 +146,10 @@ func (s *Store) ListBuckets(ctx context.Context, tx kv.Tx, filter BucketFilter, 
 		return nil, invalidBucketListRequest
 	}
 
-	// if we dont have any options it would be irresponsible to just give back all orgs in the system
 	if len(opt) == 0 {
-		opt = append(opt, influxdb.FindOptions{
-			Limit: influxdb.DefaultPageSize,
-		})
+		opt = append(opt, influxdb.FindOptions{})
 	}
 	o := opt[0]
-	if o.Limit > influxdb.MaxPageSize || o.Limit == 0 {
-		o.Limit = influxdb.MaxPageSize
-	}
 
 	// if an organization is passed we need to use the index
 	if filter.OrganizationID != nil {
@@ -202,7 +198,7 @@ func (s *Store) ListBuckets(ctx context.Context, tx kv.Tx, filter BucketFilter, 
 			bs = append(bs, b)
 		}
 
-		if len(bs) >= o.Limit {
+		if o.Limit != 0 && len(bs) >= o.Limit {
 			break
 		}
 	}
@@ -210,12 +206,12 @@ func (s *Store) ListBuckets(ctx context.Context, tx kv.Tx, filter BucketFilter, 
 	return bs, cursor.Err()
 }
 
-func (s *Store) listBucketsByOrg(ctx context.Context, tx kv.Tx, orgID influxdb.ID, o influxdb.FindOptions) ([]*influxdb.Bucket, error) {
+func (s *Store) listBucketsByOrg(ctx context.Context, tx kv.Tx, orgID platform.ID, o influxdb.FindOptions) ([]*influxdb.Bucket, error) {
 	// get the prefix key (org id with an empty name)
 	key, err := bucketIndexKey(orgID, "")
 	if err != nil {
-		return nil, &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return nil, &errors.Error{
+			Code: errors.EInvalid,
 			Err:  err,
 		}
 	}
@@ -225,7 +221,33 @@ func (s *Store) listBucketsByOrg(ctx context.Context, tx kv.Tx, orgID influxdb.I
 		return nil, err
 	}
 
-	cursor, err := idx.ForwardCursor(key, kv.WithCursorPrefix(key))
+	start := key
+	opts := []kv.CursorOption{kv.WithCursorPrefix(key)}
+	if o.Descending {
+		// To list in descending order, we have to find the last entry prefixed
+		// by the org ID. AFAICT the only way to do this given our current indexing
+		// scheme is to iterate through all entries in the org once, remembering the
+		// last-seen key.
+		start, err = func() ([]byte, error) {
+			cursor, err := idx.ForwardCursor(start, opts...)
+			if err != nil {
+				return nil, err
+			}
+			defer cursor.Close()
+
+			lastKey := start
+			for k, _ := cursor.Next(); k != nil; k, _ = cursor.Next() {
+				lastKey = k
+			}
+			return lastKey, nil
+		}()
+		if err != nil {
+			return nil, err
+		}
+		// Once we've found the end, walk backwards from it on the next iteration.
+		opts = append(opts, kv.WithCursorDirection(kv.CursorDescending))
+	}
+	cursor, err := idx.ForwardCursor(start, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -233,6 +255,7 @@ func (s *Store) listBucketsByOrg(ctx context.Context, tx kv.Tx, orgID influxdb.I
 
 	count := 0
 	bs := []*influxdb.Bucket{}
+	searchingForAfter := o.After != nil
 	for k, v := cursor.Next(); k != nil; k, v = cursor.Next() {
 		if o.Offset != 0 && count < o.Offset {
 			count++
@@ -243,11 +266,15 @@ func (s *Store) listBucketsByOrg(ctx context.Context, tx kv.Tx, orgID influxdb.I
 			return nil, err
 		}
 
-		var id influxdb.ID
+		var id platform.ID
 		if err := id.Decode(v); err != nil {
-			return nil, &influxdb.Error{
+			return nil, &errors.Error{
 				Err: err,
 			}
+		}
+		if searchingForAfter {
+			searchingForAfter = id != *o.After
+			continue
 		}
 		b, err := s.GetBucket(ctx, tx, id)
 		if err != nil {
@@ -256,7 +283,7 @@ func (s *Store) listBucketsByOrg(ctx context.Context, tx kv.Tx, orgID influxdb.I
 
 		bs = append(bs, b)
 
-		if len(bs) >= o.Limit {
+		if o.Limit != 0 && len(bs) >= o.Limit {
 			break
 		}
 	}
@@ -313,7 +340,7 @@ func (s *Store) CreateBucket(ctx context.Context, tx kv.Tx, bucket *influxdb.Buc
 	return nil
 }
 
-func (s *Store) UpdateBucket(ctx context.Context, tx kv.Tx, id influxdb.ID, upd influxdb.BucketUpdate) (*influxdb.Bucket, error) {
+func (s *Store) UpdateBucket(ctx context.Context, tx kv.Tx, id platform.ID, upd influxdb.BucketUpdate) (*influxdb.Bucket, error) {
 	encodedID, err := id.Encode()
 	if err != nil {
 		return nil, err
@@ -371,6 +398,9 @@ func (s *Store) UpdateBucket(ctx context.Context, tx kv.Tx, id influxdb.ID, upd 
 	if upd.RetentionPeriod != nil {
 		bucket.RetentionPeriod = *upd.RetentionPeriod
 	}
+	if upd.ShardGroupDuration != nil {
+		bucket.ShardGroupDuration = *upd.ShardGroupDuration
+	}
 
 	v, err := marshalBucket(bucket)
 	if err != nil {
@@ -388,7 +418,7 @@ func (s *Store) UpdateBucket(ctx context.Context, tx kv.Tx, id influxdb.ID, upd 
 	return bucket, nil
 }
 
-func (s *Store) DeleteBucket(ctx context.Context, tx kv.Tx, id influxdb.ID) error {
+func (s *Store) DeleteBucket(ctx context.Context, tx kv.Tx, id platform.ID) error {
 	bucket, err := s.GetBucket(ctx, tx, id)
 	if err != nil {
 		return err

@@ -4,21 +4,25 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
 	nethttp "net/http"
 	"net/http/httptest"
+	"os"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	errors2 "github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/mock"
 	"github.com/influxdata/influxdb/v2/notification"
 	"github.com/influxdata/influxdb/v2/notification/check"
 	"github.com/influxdata/influxdb/v2/notification/endpoint"
 	"github.com/influxdata/influxdb/v2/notification/rule"
 	"github.com/influxdata/influxdb/v2/pkger"
+	"github.com/influxdata/influxdb/v2/task/taskmodel"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -38,9 +42,9 @@ func TestLauncher_Pkger(t *testing.T) {
 
 	resourceCheck := newResourceChecker(l)
 
-	deleteStackFn := func(t *testing.T, stackID influxdb.ID) {
+	deleteStackFn := func(t *testing.T, stackID platform.ID) {
 		t.Helper()
-		err := svc.DeleteStack(ctx, struct{ OrgID, UserID, StackID influxdb.ID }{
+		err := svc.DeleteStack(ctx, struct{ OrgID, UserID, StackID platform.ID }{
 			OrgID:   l.Org.ID,
 			UserID:  l.User.ID,
 			StackID: stackID,
@@ -217,7 +221,7 @@ func TestLauncher_Pkger(t *testing.T) {
 	}
 
 	newTaskObject := func(pkgName, name, description string) pkger.Object {
-		obj := pkger.TaskToObject("", influxdb.Task{
+		obj := pkger.TaskToObject("", taskmodel.Task{
 			Name:        name,
 			Description: description,
 			Flux:        "buckets()",
@@ -256,7 +260,7 @@ func TestLauncher_Pkger(t *testing.T) {
 
 		for _, b := range summary.Buckets {
 			_, err := resourceCheck.getBucket(t, bySafeID(b.ID))
-			assertErrorCode(t, influxdb.ENotFound, err)
+			assertErrorCode(t, errors2.ENotFound, err)
 		}
 
 		for _, c := range summary.Checks {
@@ -266,12 +270,12 @@ func TestLauncher_Pkger(t *testing.T) {
 
 		for _, d := range summary.Dashboards {
 			_, err := resourceCheck.getDashboard(t, bySafeID(d.ID))
-			assertErrorCode(t, influxdb.ENotFound, err)
+			assertErrorCode(t, errors2.ENotFound, err)
 		}
 
 		for _, l := range summary.Labels {
 			_, err := resourceCheck.getLabel(t, bySafeID(l.ID))
-			assertErrorCode(t, influxdb.ENotFound, err)
+			assertErrorCode(t, errors2.ENotFound, err)
 		}
 
 		for _, e := range summary.NotificationEndpoints {
@@ -296,7 +300,7 @@ func TestLauncher_Pkger(t *testing.T) {
 
 		for _, v := range summary.Variables {
 			_, err := resourceCheck.getVariable(t, bySafeID(v.ID))
-			assertErrorCode(t, influxdb.ENotFound, err)
+			assertErrorCode(t, errors2.ENotFound, err)
 		}
 	}
 
@@ -336,7 +340,7 @@ func TestLauncher_Pkger(t *testing.T) {
 
 			t.Run("filters stacks by ID filter", func(t *testing.T) {
 				stacks, err := svc.ListStacks(ctx, l.Org.ID, pkger.ListFilter{
-					StackIDs: []influxdb.ID{newStack1.ID},
+					StackIDs: []platform.ID{newStack1.ID},
 				})
 				require.NoError(t, err)
 				require.Len(t, stacks, 1)
@@ -408,7 +412,7 @@ func TestLauncher_Pkger(t *testing.T) {
 				require.Len(t, sum.Variables, 1)
 				assert.NotZero(t, sum.Variables[0].ID)
 
-				_, err = svc.UninstallStack(ctx, struct{ OrgID, UserID, StackID influxdb.ID }{
+				_, err = svc.UninstallStack(ctx, struct{ OrgID, UserID, StackID platform.ID }{
 					OrgID:   l.Org.ID,
 					UserID:  l.User.ID,
 					StackID: newStack.ID,
@@ -471,7 +475,7 @@ func TestLauncher_Pkger(t *testing.T) {
 				require.Len(t, sum.Variables, 1)
 				assert.NotZero(t, sum.Variables[0].ID)
 
-				err = svc.DeleteStack(ctx, struct{ OrgID, UserID, StackID influxdb.ID }{
+				err = svc.DeleteStack(ctx, struct{ OrgID, UserID, StackID platform.ID }{
 					OrgID:   l.Org.ID,
 					UserID:  l.User.ID,
 					StackID: newStack.ID,
@@ -485,7 +489,7 @@ func TestLauncher_Pkger(t *testing.T) {
 				newStack, cleanup := newStackFn(t, pkger.StackCreate{})
 				defer cleanup()
 
-				err := svc.DeleteStack(ctx, struct{ OrgID, UserID, StackID influxdb.ID }{
+				err := svc.DeleteStack(ctx, struct{ OrgID, UserID, StackID platform.ID }{
 					OrgID:   l.Org.ID,
 					UserID:  l.User.ID,
 					StackID: newStack.ID,
@@ -493,7 +497,7 @@ func TestLauncher_Pkger(t *testing.T) {
 				require.NoError(t, err)
 
 				// delete same stack
-				err = svc.DeleteStack(ctx, struct{ OrgID, UserID, StackID influxdb.ID }{
+				err = svc.DeleteStack(ctx, struct{ OrgID, UserID, StackID platform.ID }{
 					OrgID:   l.Org.ID,
 					UserID:  l.User.ID,
 					StackID: newStack.ID,
@@ -503,7 +507,7 @@ func TestLauncher_Pkger(t *testing.T) {
 
 			t.Run("that doesn't exist should be successful", func(t *testing.T) {
 				// delete stack that doesn't exist
-				err := svc.DeleteStack(ctx, struct{ OrgID, UserID, StackID influxdb.ID }{
+				err := svc.DeleteStack(ctx, struct{ OrgID, UserID, StackID platform.ID }{
 					OrgID:   l.Org.ID,
 					UserID:  l.User.ID,
 					StackID: 9000,
@@ -531,8 +535,8 @@ func TestLauncher_Pkger(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, newStack2, actual)
 
-			_, err = svc.ReadStack(ctx, influxdb.ID(9000))
-			require.Equal(t, influxdb.ENotFound, influxdb.ErrorCode(err))
+			_, err = svc.ReadStack(ctx, platform.ID(9000))
+			require.Equal(t, errors2.ENotFound, errors2.ErrorCode(err))
 		})
 
 		t.Run("updating a stack", func(t *testing.T) {
@@ -544,6 +548,13 @@ func TestLauncher_Pkger(t *testing.T) {
 					TemplateURLs: []string{},
 				})
 				defer cleanup()
+
+				// Wait for time.Now() to move ahead of the stack's latest update time.
+				// We do this so that on Windows (where time.Now() is updated relatively slowly)
+				// it doesn't appear that the stack was updated at the same time it was created.
+				for now := time.Now(); now.Equal(stack.LatestEvent().UpdatedAt); now = time.Now() {
+					time.Sleep(time.Millisecond)
+				}
 
 				assertStack := func(t *testing.T, st pkger.Stack) {
 					t.Helper()
@@ -632,6 +643,10 @@ func TestLauncher_Pkger(t *testing.T) {
 		})
 
 		t.Run("apply with only a stackID succeeds when stack has URLs", func(t *testing.T) {
+			if runtime.GOOS == "windows" {
+				t.Skip("https://github.com/influxdata/influxdb/issues/22474")
+			}
+
 			svr := httptest.NewServer(nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
 				pkg := newTemplate(newBucketObject("bucket-0", "", ""))
 				b, err := pkg.Encode(pkger.EncodingJSON)
@@ -643,7 +658,7 @@ func TestLauncher_Pkger(t *testing.T) {
 			}))
 			defer svr.Close()
 
-			f, err := ioutil.TempFile("", "pkg.yml")
+			f, err := os.CreateTemp("", "pkg.yml")
 			require.NoError(t, err)
 			defer f.Close()
 
@@ -687,7 +702,7 @@ func TestLauncher_Pkger(t *testing.T) {
 			sumEquals(t, impact)
 
 			stacks, err := svc.ListStacks(ctx, l.Org.ID, pkger.ListFilter{
-				StackIDs: []influxdb.ID{newStack.ID},
+				StackIDs: []platform.ID{newStack.ID},
 			})
 			require.NoError(t, err)
 
@@ -696,7 +711,7 @@ func TestLauncher_Pkger(t *testing.T) {
 		})
 
 		t.Run("apply a pkg with a stack and associations", func(t *testing.T) {
-			testLabelMappingFn := func(t *testing.T, stackID influxdb.ID, pkg *pkger.Template, assertAssociatedLabelsFn func(pkger.Summary, []*influxdb.Label, influxdb.ResourceType)) pkger.Summary {
+			testLabelMappingFn := func(t *testing.T, stackID platform.ID, pkg *pkger.Template, assertAssociatedLabelsFn func(pkger.Summary, []*influxdb.Label, influxdb.ResourceType)) pkger.Summary {
 				t.Helper()
 
 				impact, err := svc.Apply(ctx, l.Org.ID, l.User.ID,
@@ -742,17 +757,17 @@ func TestLauncher_Pkger(t *testing.T) {
 				assert.Equal(t, "tele-0", sum.TelegrafConfigs[0].TelegrafConfig.Name)
 
 				resources := []struct {
-					resID        influxdb.ID
+					resID        platform.ID
 					resourceType influxdb.ResourceType
 				}{
-					{resID: influxdb.ID(sum.Buckets[0].ID), resourceType: influxdb.BucketsResourceType},
+					{resID: platform.ID(sum.Buckets[0].ID), resourceType: influxdb.BucketsResourceType},
 					{resID: sum.Checks[0].Check.GetID(), resourceType: influxdb.ChecksResourceType},
-					{resID: influxdb.ID(sum.Dashboards[0].ID), resourceType: influxdb.DashboardsResourceType},
+					{resID: platform.ID(sum.Dashboards[0].ID), resourceType: influxdb.DashboardsResourceType},
 					{resID: sum.NotificationEndpoints[0].NotificationEndpoint.GetID(), resourceType: influxdb.NotificationEndpointResourceType},
-					{resID: influxdb.ID(sum.NotificationRules[0].ID), resourceType: influxdb.NotificationRuleResourceType},
-					{resID: influxdb.ID(sum.Tasks[0].ID), resourceType: influxdb.TasksResourceType},
+					{resID: platform.ID(sum.NotificationRules[0].ID), resourceType: influxdb.NotificationRuleResourceType},
+					{resID: platform.ID(sum.Tasks[0].ID), resourceType: influxdb.TasksResourceType},
 					{resID: sum.TelegrafConfigs[0].TelegrafConfig.ID, resourceType: influxdb.TelegrafsResourceType},
-					{resID: influxdb.ID(sum.Variables[0].ID), resourceType: influxdb.VariablesResourceType},
+					{resID: platform.ID(sum.Variables[0].ID), resourceType: influxdb.VariablesResourceType},
 				}
 				for _, res := range resources {
 					mappedLabels, err := l.LabelService(t).FindResourceLabels(ctx, influxdb.LabelMappingFilter{
@@ -850,17 +865,17 @@ func TestLauncher_Pkger(t *testing.T) {
 				require.Error(t, err)
 
 				resources := []struct {
-					resID        influxdb.ID
+					resID        platform.ID
 					resourceType influxdb.ResourceType
 				}{
-					{resID: influxdb.ID(sum.Buckets[0].ID), resourceType: influxdb.BucketsResourceType},
+					{resID: platform.ID(sum.Buckets[0].ID), resourceType: influxdb.BucketsResourceType},
 					{resID: sum.Checks[0].Check.GetID(), resourceType: influxdb.ChecksResourceType},
-					{resID: influxdb.ID(sum.Dashboards[0].ID), resourceType: influxdb.DashboardsResourceType},
+					{resID: platform.ID(sum.Dashboards[0].ID), resourceType: influxdb.DashboardsResourceType},
 					{resID: sum.NotificationEndpoints[0].NotificationEndpoint.GetID(), resourceType: influxdb.NotificationEndpointResourceType},
-					{resID: influxdb.ID(sum.NotificationRules[0].ID), resourceType: influxdb.NotificationRuleResourceType},
-					{resID: influxdb.ID(sum.Tasks[0].ID), resourceType: influxdb.TasksResourceType},
+					{resID: platform.ID(sum.NotificationRules[0].ID), resourceType: influxdb.NotificationRuleResourceType},
+					{resID: platform.ID(sum.Tasks[0].ID), resourceType: influxdb.TasksResourceType},
 					{resID: sum.TelegrafConfigs[0].TelegrafConfig.ID, resourceType: influxdb.TelegrafsResourceType},
-					{resID: influxdb.ID(sum.Variables[0].ID), resourceType: influxdb.VariablesResourceType},
+					{resID: platform.ID(sum.Variables[0].ID), resourceType: influxdb.VariablesResourceType},
 				}
 				for _, res := range resources {
 					mappedLabels, err := l.LabelService(t).FindResourceLabels(ctx, influxdb.LabelMappingFilter{
@@ -1356,7 +1371,7 @@ func TestLauncher_Pkger(t *testing.T) {
 		})
 
 		t.Run("apply should handle cases where users have changed platform data", func(t *testing.T) {
-			initializeStackPkg := func(t *testing.T, pkg *pkger.Template) (influxdb.ID, func(), pkger.Summary) {
+			initializeStackPkg := func(t *testing.T, pkg *pkger.Template) (platform.ID, func(), pkger.Summary) {
 				t.Helper()
 
 				stack, cleanup := newStackFn(t, pkger.StackCreate{})
@@ -1375,7 +1390,7 @@ func TestLauncher_Pkger(t *testing.T) {
 				return stack.ID, cleanup, impact.Summary
 			}
 
-			testValidRemoval := func(t *testing.T, stackID influxdb.ID) {
+			testValidRemoval := func(t *testing.T, stackID platform.ID) {
 				t.Helper()
 				_, err := svc.Apply(
 					ctx,
@@ -1387,7 +1402,7 @@ func TestLauncher_Pkger(t *testing.T) {
 			}
 
 			t.Run("when a user has deleted a variable that was previously created by a stack", func(t *testing.T) {
-				testUserDeletedVariable := func(t *testing.T, actionFn func(t *testing.T, stackID influxdb.ID, initialVarObj pkger.Object, initialSum pkger.Summary)) {
+				testUserDeletedVariable := func(t *testing.T, actionFn func(t *testing.T, stackID platform.ID, initialVarObj pkger.Object, initialSum pkger.Summary)) {
 					t.Helper()
 
 					obj := newVariableObject("var-1", "", "")
@@ -1396,13 +1411,13 @@ func TestLauncher_Pkger(t *testing.T) {
 
 					require.Len(t, initialSum.Variables, 1)
 					require.NotZero(t, initialSum.Variables[0].ID)
-					resourceCheck.mustDeleteVariable(t, influxdb.ID(initialSum.Variables[0].ID))
+					resourceCheck.mustDeleteVariable(t, platform.ID(initialSum.Variables[0].ID))
 
 					actionFn(t, stackID, obj, initialSum)
 				}
 
 				t.Run("should create new resource when attempting to update", func(t *testing.T) {
-					testUserDeletedVariable(t, func(t *testing.T, stackID influxdb.ID, initialVarObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedVariable(t, func(t *testing.T, stackID platform.ID, initialVarObj pkger.Object, initialSum pkger.Summary) {
 						pkg := newTemplate(initialVarObj)
 						impact, err := svc.Apply(ctx, l.Org.ID, l.User.ID, pkger.ApplyWithTemplate(pkg), pkger.ApplyWithStackID(stackID))
 						require.NoError(t, err)
@@ -1418,14 +1433,14 @@ func TestLauncher_Pkger(t *testing.T) {
 				})
 
 				t.Run("should not error when attempting to remove", func(t *testing.T) {
-					testUserDeletedVariable(t, func(t *testing.T, stackID influxdb.ID, initialVarObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedVariable(t, func(t *testing.T, stackID platform.ID, initialVarObj pkger.Object, initialSum pkger.Summary) {
 						testValidRemoval(t, stackID)
 					})
 				})
 			})
 
 			t.Run("when a user has deleted a bucket that was previously created by a stack", func(t *testing.T) {
-				testUserDeletedBucket := func(t *testing.T, actionFn func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
+				testUserDeletedBucket := func(t *testing.T, actionFn func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
 					t.Helper()
 
 					obj := newBucketObject("bucket-1", "", "")
@@ -1434,13 +1449,13 @@ func TestLauncher_Pkger(t *testing.T) {
 
 					require.Len(t, initialSum.Buckets, 1)
 					require.NotZero(t, initialSum.Buckets[0].ID)
-					resourceCheck.mustDeleteBucket(t, influxdb.ID(initialSum.Buckets[0].ID))
+					resourceCheck.mustDeleteBucket(t, platform.ID(initialSum.Buckets[0].ID))
 
 					actionFn(t, stackID, obj, initialSum)
 				}
 
 				t.Run("should create new resource when attempting to update", func(t *testing.T) {
-					testUserDeletedBucket(t, func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedBucket(t, func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary) {
 						pkg := newTemplate(initialObj)
 						impact, err := svc.Apply(ctx, l.Org.ID, l.User.ID, pkger.ApplyWithTemplate(pkg), pkger.ApplyWithStackID(stackID))
 						require.NoError(t, err)
@@ -1456,14 +1471,14 @@ func TestLauncher_Pkger(t *testing.T) {
 				})
 
 				t.Run("should not error when attempting to remove", func(t *testing.T) {
-					testUserDeletedBucket(t, func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedBucket(t, func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary) {
 						testValidRemoval(t, stackID)
 					})
 				})
 			})
 
 			t.Run("when a user has deleted a check that was previously created by a stack", func(t *testing.T) {
-				testUserDeletedCheck := func(t *testing.T, actionFn func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
+				testUserDeletedCheck := func(t *testing.T, actionFn func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
 					t.Helper()
 
 					obj := newCheckDeadmanObject(t, "check-1", "", time.Hour)
@@ -1478,7 +1493,7 @@ func TestLauncher_Pkger(t *testing.T) {
 				}
 
 				t.Run("should create new resource when attempting to update", func(t *testing.T) {
-					testUserDeletedCheck(t, func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedCheck(t, func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary) {
 						pkg := newTemplate(initialObj)
 						impact, err := svc.Apply(ctx, l.Org.ID, l.User.ID, pkger.ApplyWithTemplate(pkg), pkger.ApplyWithStackID(stackID))
 						require.NoError(t, err)
@@ -1495,14 +1510,14 @@ func TestLauncher_Pkger(t *testing.T) {
 				})
 
 				t.Run("should not error when attempting to remove", func(t *testing.T) {
-					testUserDeletedCheck(t, func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedCheck(t, func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary) {
 						testValidRemoval(t, stackID)
 					})
 				})
 			})
 
 			t.Run("when a user has deleted a dashboard that was previously created by a stack", func(t *testing.T) {
-				testUserDeletedDashboard := func(t *testing.T, actionFn func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
+				testUserDeletedDashboard := func(t *testing.T, actionFn func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
 					t.Helper()
 
 					obj := newDashObject("dash-1", "", "")
@@ -1511,13 +1526,13 @@ func TestLauncher_Pkger(t *testing.T) {
 
 					require.Len(t, initialSum.Dashboards, 1)
 					require.NotZero(t, initialSum.Dashboards[0].ID)
-					resourceCheck.mustDeleteDashboard(t, influxdb.ID(initialSum.Dashboards[0].ID))
+					resourceCheck.mustDeleteDashboard(t, platform.ID(initialSum.Dashboards[0].ID))
 
 					actionFn(t, stackID, obj, initialSum)
 				}
 
 				t.Run("should create new resource when attempting to update", func(t *testing.T) {
-					testUserDeletedDashboard(t, func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedDashboard(t, func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary) {
 						pkg := newTemplate(initialObj)
 						impact, err := svc.Apply(ctx, l.Org.ID, l.User.ID, pkger.ApplyWithTemplate(pkg), pkger.ApplyWithStackID(stackID))
 						require.NoError(t, err)
@@ -1533,14 +1548,14 @@ func TestLauncher_Pkger(t *testing.T) {
 				})
 
 				t.Run("should not error when attempting to remove", func(t *testing.T) {
-					testUserDeletedDashboard(t, func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedDashboard(t, func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary) {
 						testValidRemoval(t, stackID)
 					})
 				})
 			})
 
 			t.Run("when a user has deleted a label that was previously created by a stack", func(t *testing.T) {
-				testUserDeletedLabel := func(t *testing.T, actionFn func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
+				testUserDeletedLabel := func(t *testing.T, actionFn func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
 					t.Helper()
 
 					obj := newLabelObject("label-1", "", "", "")
@@ -1549,13 +1564,13 @@ func TestLauncher_Pkger(t *testing.T) {
 
 					require.Len(t, initialSum.Labels, 1)
 					require.NotZero(t, initialSum.Labels[0].ID)
-					resourceCheck.mustDeleteLabel(t, influxdb.ID(initialSum.Labels[0].ID))
+					resourceCheck.mustDeleteLabel(t, platform.ID(initialSum.Labels[0].ID))
 
 					actionFn(t, stackID, obj, initialSum)
 				}
 
 				t.Run("should create new resource when attempting to update", func(t *testing.T) {
-					testUserDeletedLabel(t, func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedLabel(t, func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary) {
 						pkg := newTemplate(initialObj)
 						impact, err := svc.Apply(ctx, l.Org.ID, l.User.ID, pkger.ApplyWithTemplate(pkg), pkger.ApplyWithStackID(stackID))
 						require.NoError(t, err)
@@ -1571,14 +1586,14 @@ func TestLauncher_Pkger(t *testing.T) {
 				})
 
 				t.Run("should not error when attempting to remove", func(t *testing.T) {
-					testUserDeletedLabel(t, func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedLabel(t, func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary) {
 						testValidRemoval(t, stackID)
 					})
 				})
 			})
 
 			t.Run("when a user has deleted a notification endpoint that was previously created by a stack", func(t *testing.T) {
-				testUserDeletedEndpoint := func(t *testing.T, actionFn func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
+				testUserDeletedEndpoint := func(t *testing.T, actionFn func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
 					t.Helper()
 
 					obj := newEndpointHTTP("endpoint-1", "", "")
@@ -1593,7 +1608,7 @@ func TestLauncher_Pkger(t *testing.T) {
 				}
 
 				t.Run("should create new resource when attempting to update", func(t *testing.T) {
-					testUserDeletedEndpoint(t, func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedEndpoint(t, func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary) {
 						pkg := newTemplate(initialObj)
 						impact, err := svc.Apply(ctx, l.Org.ID, l.User.ID, pkger.ApplyWithTemplate(pkg), pkger.ApplyWithStackID(stackID))
 						require.NoError(t, err)
@@ -1610,14 +1625,14 @@ func TestLauncher_Pkger(t *testing.T) {
 				})
 
 				t.Run("should not error when attempting to remove", func(t *testing.T) {
-					testUserDeletedEndpoint(t, func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedEndpoint(t, func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary) {
 						testValidRemoval(t, stackID)
 					})
 				})
 			})
 
 			t.Run("when a user has deleted a notification rule that was previously created by a stack", func(t *testing.T) {
-				testUserDeletedRule := func(t *testing.T, actionFn func(t *testing.T, stackID influxdb.ID, initialObjects []pkger.Object, initialSum pkger.Summary)) {
+				testUserDeletedRule := func(t *testing.T, actionFn func(t *testing.T, stackID platform.ID, initialObjects []pkger.Object, initialSum pkger.Summary)) {
 					t.Helper()
 
 					endpointObj := newEndpointHTTP("endpoint-1", "", "")
@@ -1629,13 +1644,13 @@ func TestLauncher_Pkger(t *testing.T) {
 					require.NotZero(t, initialSum.NotificationEndpoints[0].NotificationEndpoint.GetID())
 					require.Len(t, initialSum.NotificationRules, 1)
 					require.NotZero(t, initialSum.NotificationRules[0].ID)
-					resourceCheck.mustDeleteRule(t, influxdb.ID(initialSum.NotificationRules[0].ID))
+					resourceCheck.mustDeleteRule(t, platform.ID(initialSum.NotificationRules[0].ID))
 
 					actionFn(t, stackID, []pkger.Object{ruleObj, endpointObj}, initialSum)
 				}
 
 				t.Run("should create new resource when attempting to update", func(t *testing.T) {
-					testUserDeletedRule(t, func(t *testing.T, stackID influxdb.ID, initialObjects []pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedRule(t, func(t *testing.T, stackID platform.ID, initialObjects []pkger.Object, initialSum pkger.Summary) {
 						pkg := newTemplate(initialObjects...)
 						impact, err := svc.Apply(ctx, l.Org.ID, l.User.ID, pkger.ApplyWithTemplate(pkg), pkger.ApplyWithStackID(stackID))
 						require.NoError(t, err)
@@ -1651,14 +1666,14 @@ func TestLauncher_Pkger(t *testing.T) {
 				})
 
 				t.Run("should not error when attempting to remove", func(t *testing.T) {
-					testUserDeletedRule(t, func(t *testing.T, stackID influxdb.ID, _ []pkger.Object, _ pkger.Summary) {
+					testUserDeletedRule(t, func(t *testing.T, stackID platform.ID, _ []pkger.Object, _ pkger.Summary) {
 						testValidRemoval(t, stackID)
 					})
 				})
 			})
 
 			t.Run("when a user has deleted a task that was previously created by a stack", func(t *testing.T) {
-				testUserDeletedTask := func(t *testing.T, actionFn func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
+				testUserDeletedTask := func(t *testing.T, actionFn func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
 					t.Helper()
 
 					obj := newTaskObject("task-1", "", "")
@@ -1667,13 +1682,13 @@ func TestLauncher_Pkger(t *testing.T) {
 
 					require.Len(t, initialSum.Tasks, 1)
 					require.NotZero(t, initialSum.Tasks[0].ID)
-					resourceCheck.mustDeleteTask(t, influxdb.ID(initialSum.Tasks[0].ID))
+					resourceCheck.mustDeleteTask(t, platform.ID(initialSum.Tasks[0].ID))
 
 					actionFn(t, stackID, obj, initialSum)
 				}
 
 				t.Run("should create new resource when attempting to update", func(t *testing.T) {
-					testUserDeletedTask(t, func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedTask(t, func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary) {
 						pkg := newTemplate(initialObj)
 						impact, err := svc.Apply(ctx, l.Org.ID, l.User.ID, pkger.ApplyWithTemplate(pkg), pkger.ApplyWithStackID(stackID))
 						require.NoError(t, err)
@@ -1689,14 +1704,14 @@ func TestLauncher_Pkger(t *testing.T) {
 				})
 
 				t.Run("should not error when attempting to remove", func(t *testing.T) {
-					testUserDeletedTask(t, func(t *testing.T, stackID influxdb.ID, _ pkger.Object, _ pkger.Summary) {
+					testUserDeletedTask(t, func(t *testing.T, stackID platform.ID, _ pkger.Object, _ pkger.Summary) {
 						testValidRemoval(t, stackID)
 					})
 				})
 			})
 
 			t.Run("when a user has deleted a telegraf config that was previously created by a stack", func(t *testing.T) {
-				testUserDeletedTelegraf := func(t *testing.T, actionFn func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
+				testUserDeletedTelegraf := func(t *testing.T, actionFn func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary)) {
 					t.Helper()
 
 					obj := newTelegrafObject("tele-1", "", "")
@@ -1711,7 +1726,7 @@ func TestLauncher_Pkger(t *testing.T) {
 				}
 
 				t.Run("should create new resource when attempting to update", func(t *testing.T) {
-					testUserDeletedTelegraf(t, func(t *testing.T, stackID influxdb.ID, initialObj pkger.Object, initialSum pkger.Summary) {
+					testUserDeletedTelegraf(t, func(t *testing.T, stackID platform.ID, initialObj pkger.Object, initialSum pkger.Summary) {
 						pkg := newTemplate(initialObj)
 						impact, err := svc.Apply(ctx, l.Org.ID, l.User.ID, pkger.ApplyWithTemplate(pkg), pkger.ApplyWithStackID(stackID))
 						require.NoError(t, err)
@@ -1727,7 +1742,7 @@ func TestLauncher_Pkger(t *testing.T) {
 				})
 
 				t.Run("should not error when attempting to remove", func(t *testing.T) {
-					testUserDeletedTelegraf(t, func(t *testing.T, stackID influxdb.ID, _ pkger.Object, _ pkger.Summary) {
+					testUserDeletedTelegraf(t, func(t *testing.T, stackID platform.ID, _ pkger.Object, _ pkger.Summary) {
 						testValidRemoval(t, stackID)
 					})
 				})
@@ -1746,7 +1761,7 @@ func TestLauncher_Pkger(t *testing.T) {
 
 			vars := impact.Summary.Variables
 			require.Len(t, vars, 1)
-			v := resourceCheck.mustGetVariable(t, byID(influxdb.ID(vars[0].ID)))
+			v := resourceCheck.mustGetVariable(t, byID(platform.ID(vars[0].ID)))
 			assert.Empty(t, v.Selected)
 
 			impact, err = svc.Apply(ctx, l.Org.ID, l.User.ID,
@@ -1757,7 +1772,7 @@ func TestLauncher_Pkger(t *testing.T) {
 
 			vars = impact.Summary.Variables
 			require.Len(t, vars, 1)
-			v = resourceCheck.mustGetVariable(t, byID(influxdb.ID(vars[0].ID)))
+			v = resourceCheck.mustGetVariable(t, byID(platform.ID(vars[0].ID)))
 			assert.Equal(t, []string{"selected"}, v.Selected)
 		})
 
@@ -2250,8 +2265,8 @@ func TestLauncher_Pkger(t *testing.T) {
 					defer cleanup()
 
 					err := l.LabelService(t).DeleteLabelMapping(ctx, &influxdb.LabelMapping{
-						LabelID:      influxdb.ID(initialSummary.Labels[0].ID),
-						ResourceID:   influxdb.ID(initialSummary.Buckets[0].ID),
+						LabelID:      platform.ID(initialSummary.Labels[0].ID),
+						ResourceID:   platform.ID(initialSummary.Buckets[0].ID),
 						ResourceType: influxdb.BucketsResourceType,
 					})
 					require.NoError(t, err)
@@ -2278,7 +2293,7 @@ func TestLauncher_Pkger(t *testing.T) {
 
 					err := l.LabelService(t).CreateLabelMapping(ctx, &influxdb.LabelMapping{
 						LabelID:      newLabel.ID,
-						ResourceID:   influxdb.ID(initialSummary.Buckets[0].ID),
+						ResourceID:   platform.ID(initialSummary.Buckets[0].ID),
 						ResourceType: influxdb.BucketsResourceType,
 					})
 					require.NoError(t, err)
@@ -2356,7 +2371,7 @@ func TestLauncher_Pkger(t *testing.T) {
 		require.NoError(t, err)
 		assert.Empty(t, rules)
 
-		tasks, _, err := l.TaskServiceKV(t).FindTasks(ctx, influxdb.TaskFilter{
+		tasks, _, err := l.TaskServiceKV(t).FindTasks(ctx, taskmodel.TaskFilter{
 			OrganizationID: &l.Org.ID,
 		})
 		require.NoError(t, err)
@@ -2711,7 +2726,6 @@ spec:
 						Type:              influxdb.ViewPropertyTypeSingleStatPlusLine,
 						Axes:              newAxes(),
 						DecimalPlaces:     influxdb.DecimalPlaces{IsEnforced: true, Digits: 1},
-						Legend:            influxdb.Legend{Type: "type", Orientation: "horizontal"},
 						Note:              "a note",
 						Prefix:            "pre",
 						Suffix:            "suf",
@@ -2761,7 +2775,6 @@ spec:
 						Type:              influxdb.ViewPropertyTypeXY,
 						Axes:              newAxes(),
 						Geom:              "step",
-						Legend:            influxdb.Legend{Type: "type", Orientation: "horizontal"},
 						Note:              "a note",
 						Queries:           []influxdb.DashboardQuery{newQuery()},
 						ShadeBelow:        true,
@@ -2945,7 +2958,7 @@ spec:
 		assert.NotZero(t, endpoints[0].NotificationEndpoint.GetID())
 		assert.Equal(t, "no auth endpoint", endpoints[0].NotificationEndpoint.GetName())
 		assert.Equal(t, "http none auth desc", endpoints[0].NotificationEndpoint.GetDescription())
-		assert.Equal(t, influxdb.TaskStatusInactive, string(endpoints[0].NotificationEndpoint.GetStatus()))
+		assert.Equal(t, taskmodel.TaskStatusInactive, string(endpoints[0].NotificationEndpoint.GetStatus()))
 		hasLabelAssociations(t, endpoints[0].LabelAssociations, 1, "label-1")
 
 		require.Len(t, sum1.NotificationRules, 1)
@@ -2987,7 +3000,7 @@ spec:
 			Query:    "buckets()  |> filter(fn: (r) => r.name !~ /^_/)  |> rename(columns: {name: \"_value\"})  |> keep(columns: [\"_value\"])",
 			Language: "flux",
 		}, varArgs.Values)
-		platformVar := resourceCheck.mustGetVariable(t, byID(influxdb.ID(vars[0].ID)))
+		platformVar := resourceCheck.mustGetVariable(t, byID(platform.ID(vars[0].ID)))
 		assert.Equal(t, []string{"rucketeer"}, platformVar.Selected)
 
 		newSumMapping := func(id pkger.SafeID, pkgName, name string, rt influxdb.ResourceType) pkger.SummaryLabelMapping {
@@ -3077,7 +3090,7 @@ spec:
 				require.Len(t, endpoints, 1)
 				assert.Equal(t, "no auth endpoint", endpoints[0].NotificationEndpoint.GetName())
 				assert.Equal(t, "http none auth desc", endpoints[0].NotificationEndpoint.GetDescription())
-				assert.Equal(t, influxdb.TaskStatusInactive, string(endpoints[0].NotificationEndpoint.GetStatus()))
+				assert.Equal(t, taskmodel.TaskStatusInactive, string(endpoints[0].NotificationEndpoint.GetStatus()))
 				hasLabelAssociations(t, endpoints[0].LabelAssociations, 1, "label-1")
 
 				require.Len(t, sum.NotificationRules, 1)
@@ -3301,7 +3314,7 @@ spec:
 			resToClone := []pkger.ResourceToClone{
 				{
 					Kind: pkger.KindBucket,
-					ID:   influxdb.ID(sum1Bkts[0].ID),
+					ID:   platform.ID(sum1Bkts[0].ID),
 				},
 				{
 					Kind: pkger.KindCheck,
@@ -3313,11 +3326,11 @@ spec:
 				},
 				{
 					Kind: pkger.KindDashboard,
-					ID:   influxdb.ID(sum1Dashs[0].ID),
+					ID:   platform.ID(sum1Dashs[0].ID),
 				},
 				{
 					Kind: pkger.KindLabel,
-					ID:   influxdb.ID(sum1Labels[0].ID),
+					ID:   platform.ID(sum1Labels[0].ID),
 				},
 				{
 					Kind: pkger.KindNotificationEndpoint,
@@ -3325,7 +3338,7 @@ spec:
 				},
 				{
 					Kind: pkger.KindTask,
-					ID:   influxdb.ID(sum1Tasks[0].ID),
+					ID:   platform.ID(sum1Tasks[0].ID),
 				},
 				{
 					Kind: pkger.KindTelegraf,
@@ -3337,12 +3350,12 @@ spec:
 				{
 					Kind: pkger.KindNotificationRule,
 					Name: "new rule name",
-					ID:   influxdb.ID(sum1Rules[0].ID),
+					ID:   platform.ID(sum1Rules[0].ID),
 				},
 				{
 					Kind: pkger.KindVariable,
 					Name: "new name",
-					ID:   influxdb.ID(sum1Vars[0].ID),
+					ID:   platform.ID(sum1Vars[0].ID),
 				},
 			}
 
@@ -3450,7 +3463,7 @@ spec:
 			_, err = svc.Apply(ctx, l.Org.ID, 0, pkger.ApplyWithTemplate(updatePkg))
 			require.Error(t, err)
 
-			bkt, err := l.BucketService(t).FindBucketByID(ctx, influxdb.ID(sum1Bkts[0].ID))
+			bkt, err := l.BucketService(t).FindBucketByID(ctx, platform.ID(sum1Bkts[0].ID))
 			require.NoError(t, err)
 			// make sure the desc change is not applied and is rolled back to prev desc
 			assert.Equal(t, sum1Bkts[0].Description, bkt.Description)
@@ -3465,7 +3478,7 @@ spec:
 			// direct comparison very annoying...
 			assert.Equal(t, sum1Checks[0].Check.(*check.Threshold).Query.Text, deadman.Query.Text)
 
-			label, err := l.LabelService(t).FindLabelByID(ctx, influxdb.ID(sum1Labels[0].ID))
+			label, err := l.LabelService(t).FindLabelByID(ctx, platform.ID(sum1Labels[0].ID))
 			require.NoError(t, err)
 			assert.Equal(t, sum1Labels[0].Properties.Description, label.Properties["description"])
 
@@ -3473,7 +3486,7 @@ spec:
 			require.NoError(t, err)
 			assert.Equal(t, sum1Endpoints[0].NotificationEndpoint.GetDescription(), endpoint.GetDescription())
 
-			v, err := l.VariableService(t).FindVariableByID(ctx, influxdb.ID(sum1Vars[0].ID))
+			v, err := l.VariableService(t).FindVariableByID(ctx, platform.ID(sum1Vars[0].ID))
 			require.NoError(t, err)
 			assert.Equal(t, sum1Vars[0].Description, v.Description)
 		})
@@ -3569,7 +3582,7 @@ spec:
 		require.NotZero(t, impact.Summary.Buckets[0].ID)
 
 		stacks, err := svc.ListStacks(ctx, l.Org.ID, pkger.ListFilter{
-			StackIDs: []influxdb.ID{impact.StackID},
+			StackIDs: []platform.ID{impact.StackID},
 		})
 		require.NoError(t, err)
 
@@ -3577,7 +3590,7 @@ spec:
 		ev := stacks[0].LatestEvent()
 		require.Len(t, ev.Resources, 1)
 		assert.Equal(t, ev.Resources[0].MetaName, "room")
-		assert.Equal(t, influxdb.ID(impact.Summary.Buckets[0].ID), ev.Resources[0].ID)
+		assert.Equal(t, platform.ID(impact.Summary.Buckets[0].ID), ev.Resources[0].ID)
 	})
 
 	t.Run("apply a template with env refs", func(t *testing.T) {
@@ -3792,6 +3805,7 @@ spec:
               |> filter(fn: (r) => r._value > params.minVal)
               |> aggregateWindow(every: v.windowPeriod, fn: max)
               |> yield(name: params.name)
+
           params:
             - key: bucket
               default: "bar"
@@ -3831,15 +3845,13 @@ spec:
 				expectedQuery := expectedParams + `
 
 from(bucket: params.bucket)
-	|> range(start: params.start, end: params.stop)
-	|> filter(fn: (r) =>
-		(r._measurement == "processes"))
-	|> filter(fn: (r) =>
-		(r.floater == params.floatVal))
-	|> filter(fn: (r) =>
-		(r._value > params.minVal))
-	|> aggregateWindow(every: v.windowPeriod, fn: max)
-	|> yield(name: params.name)`
+    |> range(start: params.start, end: params.stop)
+    |> filter(fn: (r) => r._measurement == "processes")
+    |> filter(fn: (r) => r.floater == params.floatVal)
+    |> filter(fn: (r) => r._value > params.minVal)
+    |> aggregateWindow(every: v.windowPeriod, fn: max)
+    |> yield(name: params.name)
+`
 
 				assert.Equal(t, expectedQuery, props.Queries[0].Text)
 				assert.Equal(t, "advanced", props.Queries[0].EditMode)
@@ -3868,12 +3880,12 @@ from(bucket: params.bucket)
 				actual := impact.Summary.Dashboards[0]
 
 				expectedParams := `option params = {
-	bucket: "bar",
-	start: -24h0m0s,
-	stop: now(),
-	name: "max",
-	floatVal: 37.2,
-	minVal: 10,
+    bucket: "bar",
+    start: -24h0m0s,
+    stop: now(),
+    name: "max",
+    floatVal: 37.2,
+    minVal: 10,
 }`
 				isExpectedQuery(t, actual, expectedParams)
 
@@ -3954,12 +3966,12 @@ from(bucket: params.bucket)
 				actual := impact.Summary.Dashboards[0]
 
 				expectedParams := `option params = {
-	bucket: "foobar",
-	start: -5d,
-	stop: now(),
-	name: "min",
-	floatVal: 33.3,
-	minVal: 3,
+    bucket: "foobar",
+    start: -5d,
+    stop: now(),
+    name: "min",
+    floatVal: 33.3,
+    minVal: 3,
 }`
 				isExpectedQuery(t, actual, expectedParams)
 
@@ -4056,6 +4068,7 @@ spec:
       |> filter(fn: (r) => r._value > params.minVal)
       |> aggregateWindow(every: 1m, fn: max)
       |> yield(name: params.name)
+
   params:
     - key: bucket
       default: "bar"
@@ -4083,15 +4096,13 @@ spec:
 				expectedQuery := expectedParams + `
 
 from(bucket: params.bucket)
-	|> range(start: params.start, stop: params.stop)
-	|> filter(fn: (r) =>
-		(r._measurement == "processes"))
-	|> filter(fn: (r) =>
-		(r.floater == params.floatVal))
-	|> filter(fn: (r) =>
-		(r._value > params.minVal))
-	|> aggregateWindow(every: 1m, fn: max)
-	|> yield(name: params.name)`
+    |> range(start: params.start, stop: params.stop)
+    |> filter(fn: (r) => r._measurement == "processes")
+    |> filter(fn: (r) => r.floater == params.floatVal)
+    |> filter(fn: (r) => r._value > params.minVal)
+    |> aggregateWindow(every: 1m, fn: max)
+    |> yield(name: params.name)
+`
 
 				assert.Equal(t, expectedQuery, actual.Query)
 			}
@@ -4119,12 +4130,12 @@ from(bucket: params.bucket)
 				actual := impact.Summary.Tasks[0]
 
 				expectedParams := `option params = {
-	bucket: "bar",
-	start: -24h0m0s,
-	stop: now(),
-	name: "max",
-	floatVal: 37.2,
-	minVal: 10,
+    bucket: "bar",
+    start: -24h0m0s,
+    stop: now(),
+    name: "max",
+    floatVal: 37.2,
+    minVal: 10,
 }`
 				isExpectedQuery(t, actual, expectedParams)
 
@@ -4205,12 +4216,12 @@ from(bucket: params.bucket)
 				actual := impact.Summary.Tasks[0]
 
 				expectedParams := `option params = {
-	bucket: "foobar",
-	start: -5d,
-	stop: now(),
-	name: "min",
-	floatVal: 33.3,
-	minVal: 3,
+    bucket: "foobar",
+    start: -5d,
+    stop: now(),
+    name: "min",
+    floatVal: 33.3,
+    minVal: 3,
 }`
 				isExpectedQuery(t, actual, expectedParams)
 
@@ -4579,7 +4590,7 @@ func (f *fakeBucketSVC) CreateBucket(ctx context.Context, b *influxdb.Bucket) er
 	return f.BucketService.CreateBucket(ctx, b)
 }
 
-func (f *fakeBucketSVC) UpdateBucket(ctx context.Context, id influxdb.ID, upd influxdb.BucketUpdate) (*influxdb.Bucket, error) {
+func (f *fakeBucketSVC) UpdateBucket(ctx context.Context, id platform.ID, upd influxdb.BucketUpdate) (*influxdb.Bucket, error) {
 	defer f.updateCallCount.IncrFn()()
 	if f.updateCallCount.Count() == f.updateKillCount {
 		return nil, errors.New("reached kill count")
@@ -4618,7 +4629,7 @@ type fakeRuleStore struct {
 	createKillCount int
 }
 
-func (f *fakeRuleStore) CreateNotificationRule(ctx context.Context, nr influxdb.NotificationRuleCreate, userID influxdb.ID) error {
+func (f *fakeRuleStore) CreateNotificationRule(ctx context.Context, nr influxdb.NotificationRuleCreate, userID platform.ID) error {
 	defer f.createCallCount.IncrFn()()
 	if f.createCallCount.Count() == f.createKillCount {
 		return errors.New("reached kill count")
@@ -4629,7 +4640,7 @@ func (f *fakeRuleStore) CreateNotificationRule(ctx context.Context, nr influxdb.
 func assertErrorCode(t *testing.T, expected string, err error) {
 	t.Helper()
 	assert.Error(t, err)
-	assert.Equal(t, expected, influxdb.ErrorCode(err))
+	assert.Equal(t, expected, errors2.ErrorCode(err))
 }
 
 type resourceChecker struct {
@@ -4642,14 +4653,14 @@ func newResourceChecker(tl *TestLauncher) resourceChecker {
 
 type (
 	getResourceOpt struct {
-		id   influxdb.ID
+		id   platform.ID
 		name string
 	}
 
 	getResourceOptFn func() getResourceOpt
 )
 
-func byID(id influxdb.ID) getResourceOptFn {
+func byID(id platform.ID) getResourceOptFn {
 	return func() getResourceOpt {
 		return getResourceOpt{id: id}
 	}
@@ -4663,7 +4674,7 @@ func byName(name string) getResourceOptFn {
 
 func bySafeID(id pkger.SafeID) getResourceOptFn {
 	return func() getResourceOpt {
-		return getResourceOpt{id: influxdb.ID(id)}
+		return getResourceOpt{id: platform.ID(id)}
 	}
 }
 
@@ -4699,7 +4710,7 @@ func (r resourceChecker) mustGetBucket(t *testing.T, getOpt getResourceOptFn) in
 	return bkt
 }
 
-func (r resourceChecker) mustDeleteBucket(t *testing.T, id influxdb.ID) {
+func (r resourceChecker) mustDeleteBucket(t *testing.T, id platform.ID) {
 	t.Helper()
 	require.NoError(t, r.tl.BucketService(t).DeleteBucket(ctx, id))
 }
@@ -4736,7 +4747,7 @@ func (r resourceChecker) mustGetCheck(t *testing.T, getOpt getResourceOptFn) inf
 	return c
 }
 
-func (r resourceChecker) mustDeleteCheck(t *testing.T, id influxdb.ID) {
+func (r resourceChecker) mustDeleteCheck(t *testing.T, id platform.ID) {
 	t.Helper()
 
 	require.NoError(t, r.tl.CheckService().DeleteCheck(ctx, id))
@@ -4787,7 +4798,7 @@ func (r resourceChecker) mustGetDashboard(t *testing.T, getOpt getResourceOptFn)
 	return dash
 }
 
-func (r resourceChecker) mustDeleteDashboard(t *testing.T, id influxdb.ID) {
+func (r resourceChecker) mustDeleteDashboard(t *testing.T, id platform.ID) {
 	t.Helper()
 
 	require.NoError(t, r.tl.DashboardService(t).DeleteDashboard(ctx, id))
@@ -4835,7 +4846,7 @@ func (r resourceChecker) mustGetEndpoint(t *testing.T, getOpt getResourceOptFn) 
 	return e
 }
 
-func (r resourceChecker) mustDeleteEndpoint(t *testing.T, id influxdb.ID) {
+func (r resourceChecker) mustDeleteEndpoint(t *testing.T, id platform.ID) {
 	t.Helper()
 
 	_, _, err := r.tl.NotificationEndpointService(t).DeleteNotificationEndpoint(ctx, id)
@@ -4888,7 +4899,7 @@ func (r resourceChecker) mustGetLabel(t *testing.T, getOpt getResourceOptFn) inf
 	return l
 }
 
-func (r resourceChecker) mustDeleteLabel(t *testing.T, id influxdb.ID) {
+func (r resourceChecker) mustDeleteLabel(t *testing.T, id platform.ID) {
 	t.Helper()
 	require.NoError(t, r.tl.LabelService(t).DeleteLabel(ctx, id))
 }
@@ -4935,29 +4946,29 @@ func (r resourceChecker) mustGetRule(t *testing.T, getOpt getResourceOptFn) infl
 	return rule
 }
 
-func (r resourceChecker) mustDeleteRule(t *testing.T, id influxdb.ID) {
+func (r resourceChecker) mustDeleteRule(t *testing.T, id platform.ID) {
 	t.Helper()
 
 	require.NoError(t, r.tl.NotificationRuleService(t).DeleteNotificationRule(ctx, id))
 }
 
-func (r resourceChecker) getTask(t *testing.T, getOpt getResourceOptFn) (influxdb.Task, error) {
+func (r resourceChecker) getTask(t *testing.T, getOpt getResourceOptFn) (taskmodel.Task, error) {
 	t.Helper()
 
 	taskSVC := r.tl.TaskService(t)
 
 	var (
-		task *influxdb.Task
+		task *taskmodel.Task
 		err  error
 	)
 	switch opt := getOpt(); {
 	case opt.name != "":
-		tasks, _, err := taskSVC.FindTasks(ctx, influxdb.TaskFilter{
+		tasks, _, err := taskSVC.FindTasks(ctx, taskmodel.TaskFilter{
 			Name:           &opt.name,
 			OrganizationID: &r.tl.Org.ID,
 		})
 		if err != nil {
-			return influxdb.Task{}, err
+			return taskmodel.Task{}, err
 		}
 		for _, tt := range tasks {
 			if tt.Name == opt.name {
@@ -4971,13 +4982,13 @@ func (r resourceChecker) getTask(t *testing.T, getOpt getResourceOptFn) (influxd
 		require.Fail(t, "did not provide a valid get option")
 	}
 	if task == nil {
-		return influxdb.Task{}, errors.New("did not find expected task by name")
+		return taskmodel.Task{}, errors.New("did not find expected task by name")
 	}
 
 	return *task, err
 }
 
-func (r resourceChecker) mustGetTask(t *testing.T, getOpt getResourceOptFn) influxdb.Task {
+func (r resourceChecker) mustGetTask(t *testing.T, getOpt getResourceOptFn) taskmodel.Task {
 	t.Helper()
 
 	task, err := r.getTask(t, getOpt)
@@ -4985,7 +4996,7 @@ func (r resourceChecker) mustGetTask(t *testing.T, getOpt getResourceOptFn) infl
 	return task
 }
 
-func (r resourceChecker) mustDeleteTask(t *testing.T, id influxdb.ID) {
+func (r resourceChecker) mustDeleteTask(t *testing.T, id platform.ID) {
 	t.Helper()
 
 	require.NoError(t, r.tl.TaskService(t).DeleteTask(ctx, id))
@@ -5031,7 +5042,7 @@ func (r resourceChecker) mustGetTelegrafConfig(t *testing.T, getOpt getResourceO
 	return tele
 }
 
-func (r resourceChecker) mustDeleteTelegrafConfig(t *testing.T, id influxdb.ID) {
+func (r resourceChecker) mustDeleteTelegrafConfig(t *testing.T, id platform.ID) {
 	t.Helper()
 
 	require.NoError(t, r.tl.TelegrafService(t).DeleteTelegrafConfig(ctx, id))
@@ -5083,7 +5094,7 @@ func (r resourceChecker) mustGetVariable(t *testing.T, getOpt getResourceOptFn) 
 	return l
 }
 
-func (r resourceChecker) mustDeleteVariable(t *testing.T, id influxdb.ID) {
+func (r resourceChecker) mustDeleteVariable(t *testing.T, id platform.ID) {
 	t.Helper()
 
 	err := r.tl.VariableService(t).DeleteVariable(ctx, id)

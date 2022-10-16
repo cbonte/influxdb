@@ -1,7 +1,6 @@
 package gather
 
 import (
-	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -32,7 +31,7 @@ func newPrometheusScraper() *prometheusScraper {
 }
 
 // Gather parse metrics from a scraper target url.
-func (p *prometheusScraper) Gather(ctx context.Context, target influxdb.ScraperTarget) (collected MetricsCollection, err error) {
+func (p *prometheusScraper) Gather(target influxdb.ScraperTarget) (collected MetricsCollection, err error) {
 	var (
 		resp *http.Response
 	)
@@ -116,7 +115,7 @@ func (p *prometheusScraper) parse(r io.Reader, header http.Header, target influx
 				Tags:      tags,
 				Fields:    fields,
 				Name:      name,
-				Type:      MetricType(family.GetType()),
+				Type:      family.GetType(),
 			}
 			ms = append(ms, me)
 		}

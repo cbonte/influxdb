@@ -5,18 +5,19 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/gogo/protobuf/types"
 	"github.com/influxdata/flux"
 	"github.com/influxdata/flux/execute"
+	"github.com/influxdata/flux/interval"
 	"github.com/influxdata/flux/memory"
 	"github.com/influxdata/flux/plan"
 	"github.com/influxdata/flux/values"
-	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/models"
 	"github.com/influxdata/influxdb/v2/query"
 	storage "github.com/influxdata/influxdb/v2/storage/reads"
 	"github.com/influxdata/influxdb/v2/storage/reads/datatypes"
 	"github.com/influxdata/influxdb/v2/tsdb/cursors"
+	"google.golang.org/protobuf/types/known/anypb"
 )
 
 // GroupCursorError is returned when two different cursor types
@@ -61,7 +62,7 @@ func NewReader(s storage.Store) query.StorageReader {
 	return &storeReader{s: s}
 }
 
-func (r *storeReader) ReadFilter(ctx context.Context, spec query.ReadFilterSpec, alloc *memory.Allocator) (query.TableIterator, error) {
+func (r *storeReader) ReadFilter(ctx context.Context, spec query.ReadFilterSpec, alloc memory.Allocator) (query.TableIterator, error) {
 	return &filterIterator{
 		ctx:   ctx,
 		s:     r.s,
@@ -71,7 +72,7 @@ func (r *storeReader) ReadFilter(ctx context.Context, spec query.ReadFilterSpec,
 	}, nil
 }
 
-func (r *storeReader) ReadGroup(ctx context.Context, spec query.ReadGroupSpec, alloc *memory.Allocator) (query.TableIterator, error) {
+func (r *storeReader) ReadGroup(ctx context.Context, spec query.ReadGroupSpec, alloc memory.Allocator) (query.TableIterator, error) {
 	return &groupIterator{
 		ctx:   ctx,
 		s:     r.s,
@@ -81,7 +82,7 @@ func (r *storeReader) ReadGroup(ctx context.Context, spec query.ReadGroupSpec, a
 	}, nil
 }
 
-func (r *storeReader) ReadWindowAggregate(ctx context.Context, spec query.ReadWindowAggregateSpec, alloc *memory.Allocator) (query.TableIterator, error) {
+func (r *storeReader) ReadWindowAggregate(ctx context.Context, spec query.ReadWindowAggregateSpec, alloc memory.Allocator) (query.TableIterator, error) {
 	return &windowAggregateIterator{
 		ctx:   ctx,
 		s:     r.s,
@@ -91,7 +92,7 @@ func (r *storeReader) ReadWindowAggregate(ctx context.Context, spec query.ReadWi
 	}, nil
 }
 
-func (r *storeReader) ReadTagKeys(ctx context.Context, spec query.ReadTagKeysSpec, alloc *memory.Allocator) (query.TableIterator, error) {
+func (r *storeReader) ReadTagKeys(ctx context.Context, spec query.ReadTagKeysSpec, alloc memory.Allocator) (query.TableIterator, error) {
 	return &tagKeysIterator{
 		ctx:       ctx,
 		bounds:    spec.Bounds,
@@ -102,7 +103,7 @@ func (r *storeReader) ReadTagKeys(ctx context.Context, spec query.ReadTagKeysSpe
 	}, nil
 }
 
-func (r *storeReader) ReadTagValues(ctx context.Context, spec query.ReadTagValuesSpec, alloc *memory.Allocator) (query.TableIterator, error) {
+func (r *storeReader) ReadTagValues(ctx context.Context, spec query.ReadTagValuesSpec, alloc memory.Allocator) (query.TableIterator, error) {
 	return &tagValuesIterator{
 		ctx:       ctx,
 		bounds:    spec.Bounds,
@@ -113,6 +114,21 @@ func (r *storeReader) ReadTagValues(ctx context.Context, spec query.ReadTagValue
 	}, nil
 }
 
+func (r *storeReader) ReadSeriesCardinality(ctx context.Context, spec query.ReadSeriesCardinalitySpec, alloc memory.Allocator) (query.TableIterator, error) {
+	return &seriesCardinalityIterator{
+		ctx:       ctx,
+		bounds:    spec.Bounds,
+		s:         r.s,
+		readSpec:  spec,
+		predicate: spec.Predicate,
+		alloc:     alloc,
+	}, nil
+}
+
+func (r *storeReader) SupportReadSeriesCardinality(ctx context.Context) bool {
+	return r.s.SupportReadSeriesCardinality(ctx)
+}
+
 func (r *storeReader) Close() {}
 
 type filterIterator struct {
@@ -121,7 +137,7 @@ type filterIterator struct {
 	spec  query.ReadFilterSpec
 	stats cursors.CursorStats
 	cache *tagsCache
-	alloc *memory.Allocator
+	alloc memory.Allocator
 }
 
 func (fi *filterIterator) Statistics() cursors.CursorStats { return fi.stats }
@@ -133,7 +149,7 @@ func (fi *filterIterator) Do(f func(flux.Table) error) error {
 	)
 
 	// Setup read request
-	any, err := types.MarshalAny(src)
+	any, err := anypb.New(src)
 	if err != nil {
 		return err
 	}
@@ -141,8 +157,10 @@ func (fi *filterIterator) Do(f func(flux.Table) error) error {
 	var req datatypes.ReadFilterRequest
 	req.ReadSource = any
 	req.Predicate = fi.spec.Predicate
-	req.Range.Start = int64(fi.spec.Bounds.Start)
-	req.Range.End = int64(fi.spec.Bounds.Stop)
+	req.Range = &datatypes.TimestampRange{
+		Start: int64(fi.spec.Bounds.Start),
+		End:   int64(fi.spec.Bounds.Stop),
+	}
 
 	rs, err := fi.s.ReadFilter(fi.ctx, &req)
 	if err != nil {
@@ -236,7 +254,7 @@ type groupIterator struct {
 	spec  query.ReadGroupSpec
 	stats cursors.CursorStats
 	cache *tagsCache
-	alloc *memory.Allocator
+	alloc memory.Allocator
 }
 
 func (gi *groupIterator) Statistics() cursors.CursorStats { return gi.stats }
@@ -248,7 +266,7 @@ func (gi *groupIterator) Do(f func(flux.Table) error) error {
 	)
 
 	// Setup read request
-	any, err := types.MarshalAny(src)
+	any, err := anypb.New(src)
 	if err != nil {
 		return err
 	}
@@ -256,12 +274,14 @@ func (gi *groupIterator) Do(f func(flux.Table) error) error {
 	var req datatypes.ReadGroupRequest
 	req.ReadSource = any
 	req.Predicate = gi.spec.Predicate
-	req.Range.Start = int64(gi.spec.Bounds.Start)
-	req.Range.End = int64(gi.spec.Bounds.Stop)
+	req.Range = &datatypes.TimestampRange{
+		Start: int64(gi.spec.Bounds.Start),
+		End:   int64(gi.spec.Bounds.Stop),
+	}
 
 	if len(gi.spec.GroupKeys) > 0 && gi.spec.GroupMode == query.GroupModeNone {
-		return &influxdb.Error{
-			Code: influxdb.EInternal,
+		return &errors.Error{
+			Code: errors.EInternal,
 			Msg:  "cannot have group mode none with group key values",
 		}
 	}
@@ -270,7 +290,7 @@ func (gi *groupIterator) Do(f func(flux.Table) error) error {
 
 	if agg, err := determineAggregateMethod(gi.spec.AggregateMethod); err != nil {
 		return err
-	} else if agg != datatypes.AggregateTypeNone {
+	} else if agg != datatypes.Aggregate_AggregateTypeNone {
 		req.Aggregate = &datatypes.Aggregate{Type: agg}
 	}
 
@@ -375,10 +395,10 @@ READ:
 
 func determineAggregateMethod(agg string) (datatypes.Aggregate_AggregateType, error) {
 	if agg == "" {
-		return datatypes.AggregateTypeNone, nil
+		return datatypes.Aggregate_AggregateTypeNone, nil
 	}
 
-	if t, ok := datatypes.Aggregate_AggregateType_value[strings.ToUpper(agg)]; ok {
+	if t, ok := datatypes.AggregateNameMap[strings.ToUpper(agg)]; ok {
 		return datatypes.Aggregate_AggregateType(t), nil
 	}
 	return 0, fmt.Errorf("unknown aggregate type %q", agg)
@@ -387,9 +407,9 @@ func determineAggregateMethod(agg string) (datatypes.Aggregate_AggregateType, er
 func convertGroupMode(m query.GroupMode) datatypes.ReadGroupRequest_Group {
 	switch m {
 	case query.GroupModeNone:
-		return datatypes.GroupNone
+		return datatypes.ReadGroupRequest_GroupNone
 	case query.GroupModeBy:
-		return datatypes.GroupBy
+		return datatypes.ReadGroupRequest_GroupBy
 	}
 	panic(fmt.Sprint("invalid group mode: ", m))
 }
@@ -502,8 +522,10 @@ func IsSelector(agg *datatypes.Aggregate) bool {
 	if agg == nil {
 		return false
 	}
-	return agg.Type == datatypes.AggregateTypeMin || agg.Type == datatypes.AggregateTypeMax ||
-		agg.Type == datatypes.AggregateTypeFirst || agg.Type == datatypes.AggregateTypeLast
+	return agg.Type == datatypes.Aggregate_AggregateTypeMin ||
+		agg.Type == datatypes.Aggregate_AggregateTypeMax ||
+		agg.Type == datatypes.Aggregate_AggregateTypeFirst ||
+		agg.Type == datatypes.Aggregate_AggregateTypeLast
 }
 
 func determineTableColsForGroup(tagKeys [][]byte, typ flux.ColType, agg *datatypes.Aggregate, groupKey flux.GroupKey) ([]flux.ColMeta, [][]byte) {
@@ -607,7 +629,7 @@ type windowAggregateIterator struct {
 	spec  query.ReadWindowAggregateSpec
 	stats cursors.CursorStats
 	cache *tagsCache
-	alloc *memory.Allocator
+	alloc memory.Allocator
 }
 
 func (wai *windowAggregateIterator) Statistics() cursors.CursorStats { return wai.stats }
@@ -619,7 +641,7 @@ func (wai *windowAggregateIterator) Do(f func(flux.Table) error) error {
 	)
 
 	// Setup read request
-	any, err := types.MarshalAny(src)
+	any, err := anypb.New(src)
 	if err != nil {
 		return err
 	}
@@ -627,8 +649,10 @@ func (wai *windowAggregateIterator) Do(f func(flux.Table) error) error {
 	var req datatypes.ReadWindowAggregateRequest
 	req.ReadSource = any
 	req.Predicate = wai.spec.Predicate
-	req.Range.Start = int64(wai.spec.Bounds.Start)
-	req.Range.End = int64(wai.spec.Bounds.Stop)
+	req.Range = &datatypes.TimestampRange{
+		Start: int64(wai.spec.Bounds.Start),
+		End:   int64(wai.spec.Bounds.Stop),
+	}
 
 	req.Window = &datatypes.Window{
 		Every: &datatypes.Duration{
@@ -648,7 +672,7 @@ func (wai *windowAggregateIterator) Do(f func(flux.Table) error) error {
 	for i, aggKind := range wai.spec.Aggregates {
 		if agg, err := determineAggregateMethod(string(aggKind)); err != nil {
 			return err
-		} else if agg != datatypes.AggregateTypeNone {
+		} else if agg != datatypes.Aggregate_AggregateTypeNone {
 			req.Aggregate[i] = &datatypes.Aggregate{Type: agg}
 		}
 	}
@@ -692,6 +716,11 @@ func (wai *windowAggregateIterator) handleRead(f func(flux.Table) error, rs stor
 		}
 	}
 
+	window, err := interval.NewWindow(wai.spec.Window.Every, wai.spec.Window.Period, wai.spec.Window.Offset)
+	if err != nil {
+		return err
+	}
+
 	// these resources must be closed if not nil on return
 	var (
 		cur   cursors.Cursor
@@ -723,78 +752,78 @@ READ:
 		hasTimeCol := timeColumn != ""
 		switch typedCur := cur.(type) {
 		case cursors.IntegerArrayCursor:
-			if !selector {
+			if !selector || wai.spec.ForceAggregate {
 				var fillValue *int64
 				if isAggregateCount(wai.spec.Aggregates[0]) {
 					fillValue = func(v int64) *int64 { return &v }(0)
 				}
 				cols, defs := determineTableColsForWindowAggregate(rs.Tags(), flux.TInt, hasTimeCol)
-				table = newIntegerWindowTable(done, typedCur, bnds, wai.spec.Window, createEmpty, timeColumn, fillValue, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newIntegerWindowTable(done, typedCur, bnds, window, createEmpty, timeColumn, !selector, fillValue, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			} else if createEmpty && !hasTimeCol {
 				cols, defs := determineTableColsForSeries(rs.Tags(), flux.TInt)
-				table = newIntegerEmptyWindowSelectorTable(done, typedCur, bnds, wai.spec.Window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newIntegerEmptyWindowSelectorTable(done, typedCur, bnds, window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			} else {
 				// Note hasTimeCol == true means that aggregateWindow() was called.
 				// Because aggregateWindow() ultimately removes empty tables we
 				// don't bother creating them here.
 				cols, defs := determineTableColsForSeries(rs.Tags(), flux.TInt)
-				table = newIntegerWindowSelectorTable(done, typedCur, bnds, wai.spec.Window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newIntegerWindowSelectorTable(done, typedCur, bnds, window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			}
 		case cursors.FloatArrayCursor:
-			if !selector {
+			if !selector || wai.spec.ForceAggregate {
 				cols, defs := determineTableColsForWindowAggregate(rs.Tags(), flux.TFloat, hasTimeCol)
-				table = newFloatWindowTable(done, typedCur, bnds, wai.spec.Window, createEmpty, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newFloatWindowTable(done, typedCur, bnds, window, createEmpty, timeColumn, !selector, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			} else if createEmpty && !hasTimeCol {
 				cols, defs := determineTableColsForSeries(rs.Tags(), flux.TFloat)
-				table = newFloatEmptyWindowSelectorTable(done, typedCur, bnds, wai.spec.Window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newFloatEmptyWindowSelectorTable(done, typedCur, bnds, window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			} else {
 				// Note hasTimeCol == true means that aggregateWindow() was called.
 				// Because aggregateWindow() ultimately removes empty tables we
 				// don't bother creating them here.
 				cols, defs := determineTableColsForSeries(rs.Tags(), flux.TFloat)
-				table = newFloatWindowSelectorTable(done, typedCur, bnds, wai.spec.Window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newFloatWindowSelectorTable(done, typedCur, bnds, window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			}
 		case cursors.UnsignedArrayCursor:
-			if !selector {
+			if !selector || wai.spec.ForceAggregate {
 				cols, defs := determineTableColsForWindowAggregate(rs.Tags(), flux.TUInt, hasTimeCol)
-				table = newUnsignedWindowTable(done, typedCur, bnds, wai.spec.Window, createEmpty, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newUnsignedWindowTable(done, typedCur, bnds, window, createEmpty, timeColumn, !selector, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			} else if createEmpty && !hasTimeCol {
 				cols, defs := determineTableColsForSeries(rs.Tags(), flux.TUInt)
-				table = newUnsignedEmptyWindowSelectorTable(done, typedCur, bnds, wai.spec.Window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newUnsignedEmptyWindowSelectorTable(done, typedCur, bnds, window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			} else {
 				// Note hasTimeCol == true means that aggregateWindow() was called.
 				// Because aggregateWindow() ultimately removes empty tables we
 				// don't bother creating them here.
 				cols, defs := determineTableColsForSeries(rs.Tags(), flux.TUInt)
-				table = newUnsignedWindowSelectorTable(done, typedCur, bnds, wai.spec.Window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newUnsignedWindowSelectorTable(done, typedCur, bnds, window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			}
 		case cursors.BooleanArrayCursor:
-			if !selector {
+			if !selector || wai.spec.ForceAggregate {
 				cols, defs := determineTableColsForWindowAggregate(rs.Tags(), flux.TBool, hasTimeCol)
-				table = newBooleanWindowTable(done, typedCur, bnds, wai.spec.Window, createEmpty, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newBooleanWindowTable(done, typedCur, bnds, window, createEmpty, timeColumn, !selector, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			} else if createEmpty && !hasTimeCol {
 				cols, defs := determineTableColsForSeries(rs.Tags(), flux.TBool)
-				table = newBooleanEmptyWindowSelectorTable(done, typedCur, bnds, wai.spec.Window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newBooleanEmptyWindowSelectorTable(done, typedCur, bnds, window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			} else {
 				// Note hasTimeCol == true means that aggregateWindow() was called.
 				// Because aggregateWindow() ultimately removes empty tables we
 				// don't bother creating them here.
 				cols, defs := determineTableColsForSeries(rs.Tags(), flux.TBool)
-				table = newBooleanWindowSelectorTable(done, typedCur, bnds, wai.spec.Window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newBooleanWindowSelectorTable(done, typedCur, bnds, window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			}
 		case cursors.StringArrayCursor:
-			if !selector {
+			if !selector || wai.spec.ForceAggregate {
 				cols, defs := determineTableColsForWindowAggregate(rs.Tags(), flux.TString, hasTimeCol)
-				table = newStringWindowTable(done, typedCur, bnds, wai.spec.Window, createEmpty, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newStringWindowTable(done, typedCur, bnds, window, createEmpty, timeColumn, !selector, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			} else if createEmpty && !hasTimeCol {
 				cols, defs := determineTableColsForSeries(rs.Tags(), flux.TString)
-				table = newStringEmptyWindowSelectorTable(done, typedCur, bnds, wai.spec.Window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newStringEmptyWindowSelectorTable(done, typedCur, bnds, window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			} else {
 				// Note hasTimeCol == true means that aggregateWindow() was called.
 				// Because aggregateWindow() ultimately removes empty tables we
 				// don't bother creating them here.
 				cols, defs := determineTableColsForSeries(rs.Tags(), flux.TString)
-				table = newStringWindowSelectorTable(done, typedCur, bnds, wai.spec.Window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
+				table = newStringWindowSelectorTable(done, typedCur, bnds, window, timeColumn, key, cols, rs.Tags(), defs, wai.cache, wai.alloc)
 			}
 		default:
 			panic(fmt.Sprintf("unreachable: %T", typedCur))
@@ -835,7 +864,7 @@ type tagKeysIterator struct {
 	s         storage.Store
 	readSpec  query.ReadTagKeysSpec
 	predicate *datatypes.Predicate
-	alloc     *memory.Allocator
+	alloc     memory.Allocator
 }
 
 func (ti *tagKeysIterator) Do(f func(flux.Table) error) error {
@@ -845,15 +874,17 @@ func (ti *tagKeysIterator) Do(f func(flux.Table) error) error {
 	)
 
 	var req datatypes.TagKeysRequest
-	any, err := types.MarshalAny(src)
+	any, err := anypb.New(src)
 	if err != nil {
 		return err
 	}
 
 	req.TagsSource = any
 	req.Predicate = ti.predicate
-	req.Range.Start = int64(ti.bounds.Start)
-	req.Range.End = int64(ti.bounds.Stop)
+	req.Range = &datatypes.TimestampRange{
+		Start: int64(ti.bounds.Start),
+		End:   int64(ti.bounds.Stop),
+	}
 
 	rs, err := ti.s.TagKeys(ti.ctx, &req)
 	if err != nil {
@@ -918,7 +949,7 @@ type tagValuesIterator struct {
 	s         storage.Store
 	readSpec  query.ReadTagValuesSpec
 	predicate *datatypes.Predicate
-	alloc     *memory.Allocator
+	alloc     memory.Allocator
 }
 
 func (ti *tagValuesIterator) Do(f func(flux.Table) error) error {
@@ -928,7 +959,7 @@ func (ti *tagValuesIterator) Do(f func(flux.Table) error) error {
 	)
 
 	var req datatypes.TagValuesRequest
-	any, err := types.MarshalAny(src)
+	any, err := anypb.New(src)
 	if err != nil {
 		return err
 	}
@@ -943,8 +974,10 @@ func (ti *tagValuesIterator) Do(f func(flux.Table) error) error {
 		req.TagKey = ti.readSpec.TagKey
 	}
 	req.Predicate = ti.predicate
-	req.Range.Start = int64(ti.bounds.Start)
-	req.Range.End = int64(ti.bounds.Stop)
+	req.Range = &datatypes.TimestampRange{
+		Start: int64(ti.bounds.Start),
+		End:   int64(ti.bounds.Stop),
+	}
 
 	rs, err := ti.s.TagValues(ti.ctx, &req)
 	if err != nil {
@@ -985,4 +1018,75 @@ func (ti *tagValuesIterator) handleRead(f func(flux.Table) error, rs cursors.Str
 
 func (ti *tagValuesIterator) Statistics() cursors.CursorStats {
 	return cursors.CursorStats{}
+}
+
+type seriesCardinalityIterator struct {
+	ctx       context.Context
+	bounds    execute.Bounds
+	s         storage.Store
+	readSpec  query.ReadSeriesCardinalitySpec
+	predicate *datatypes.Predicate
+	alloc     memory.Allocator
+	stats     cursors.CursorStats
+}
+
+func (si *seriesCardinalityIterator) Do(f func(flux.Table) error) error {
+	src := si.s.GetSource(
+		uint64(si.readSpec.OrganizationID),
+		uint64(si.readSpec.BucketID),
+	)
+
+	var req datatypes.ReadSeriesCardinalityRequest
+	any, err := anypb.New(src)
+	if err != nil {
+		return err
+	}
+	req.ReadSource = any
+
+	req.Predicate = si.predicate
+	req.Range = &datatypes.TimestampRange{
+		Start: int64(si.bounds.Start),
+		End:   int64(si.bounds.Stop),
+	}
+
+	rs, err := si.s.ReadSeriesCardinality(si.ctx, &req)
+	if err != nil {
+		return err
+	}
+	si.stats.Add(rs.Stats())
+	return si.handleRead(f, rs)
+}
+
+func (si *seriesCardinalityIterator) handleRead(f func(flux.Table) error, rs cursors.Int64Iterator) error {
+	key := execute.NewGroupKey(nil, nil)
+	builder := execute.NewColListTableBuilder(key, si.alloc)
+	valueIdx, err := builder.AddCol(flux.ColMeta{
+		Label: execute.DefaultValueColLabel,
+		Type:  flux.TInt,
+	})
+	if err != nil {
+		return err
+	}
+	defer builder.ClearData()
+
+	for rs.Next() {
+		if err := builder.AppendInt(valueIdx, rs.Value()); err != nil {
+			return err
+		}
+	}
+
+	// Construct the table and add to the reference count so we can free the table
+	// later.
+	tbl, err := builder.Table()
+	if err != nil {
+		return err
+	}
+
+	// Release the references to the arrays held by the builder.
+	builder.ClearData()
+	return f(tbl)
+}
+
+func (si *seriesCardinalityIterator) Statistics() cursors.CursorStats {
+	return si.stats
 }

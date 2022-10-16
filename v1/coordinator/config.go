@@ -3,16 +3,10 @@
 package coordinator
 
 import (
-	"time"
-
 	"github.com/influxdata/influxdb/v2/toml"
-	"github.com/influxdata/influxdb/v2/v1/monitor/diagnostics"
 )
 
 const (
-	// DefaultWriteTimeout is the default timeout for a complete write to succeed.
-	DefaultWriteTimeout = 10 * time.Second
-
 	// DefaultMaxConcurrentQueries is the maximum number of running queries.
 	// A value of zero will make the maximum query limit unlimited.
 	DefaultMaxConcurrentQueries = 0
@@ -28,7 +22,6 @@ const (
 
 // Config represents the configuration for the coordinator service.
 type Config struct {
-	WriteTimeout         toml.Duration `toml:"write-timeout"`
 	MaxConcurrentQueries int           `toml:"max-concurrent-queries"`
 	LogQueriesAfter      toml.Duration `toml:"log-queries-after"`
 	MaxSelectPointN      int           `toml:"max-select-point"`
@@ -39,21 +32,8 @@ type Config struct {
 // NewConfig returns an instance of Config with defaults.
 func NewConfig() Config {
 	return Config{
-		WriteTimeout:         toml.Duration(DefaultWriteTimeout),
 		MaxConcurrentQueries: DefaultMaxConcurrentQueries,
 		MaxSelectPointN:      DefaultMaxSelectPointN,
 		MaxSelectSeriesN:     DefaultMaxSelectSeriesN,
 	}
-}
-
-// Diagnostics returns a diagnostics representation of a subset of the Config.
-func (c Config) Diagnostics() (*diagnostics.Diagnostics, error) {
-	return diagnostics.RowFromMap(map[string]interface{}{
-		"write-timeout":          c.WriteTimeout,
-		"max-concurrent-queries": c.MaxConcurrentQueries,
-		"log-queries-after":      c.LogQueriesAfter,
-		"max-select-point":       c.MaxSelectPointN,
-		"max-select-series":      c.MaxSelectSeriesN,
-		"max-select-buckets":     c.MaxSelectBucketsN,
-	}), nil
 }

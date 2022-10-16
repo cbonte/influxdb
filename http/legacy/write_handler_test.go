@@ -16,6 +16,7 @@ import (
 	pcontext "github.com/influxdata/influxdb/v2/context"
 	"github.com/influxdata/influxdb/v2/dbrp"
 	"github.com/influxdata/influxdb/v2/http/mocks"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	kithttp "github.com/influxdata/influxdb/v2/kit/transport/http"
 	"github.com/influxdata/influxdb/v2/models"
 	"github.com/influxdata/influxdb/v2/snowflake"
@@ -33,7 +34,7 @@ func TestWriteHandler_BucketAndMappingExistsDefaultRP(t *testing.T) {
 	var (
 		// Mocked Services
 		eventRecorder  = mocks.NewMockEventRecorder(ctrl)
-		dbrpMappingSvc = mocks.NewMockDBRPMappingServiceV2(ctrl)
+		dbrpMappingSvc = mocks.NewMockDBRPMappingService(ctrl)
 		bucketService  = mocks.NewMockBucketService(ctrl)
 		pointsWriter   = mocks.NewMockPointsWriter(ctrl)
 
@@ -46,7 +47,7 @@ func TestWriteHandler_BucketAndMappingExistsDefaultRP(t *testing.T) {
 			RetentionPolicyName: "autogen",
 			RetentionPeriod:     72 * time.Hour,
 		}
-		mapping = &influxdb.DBRPMappingV2{
+		mapping = &influxdb.DBRPMapping{
 			OrganizationID:  orgID,
 			BucketID:        bucket.ID,
 			Database:        "mydb",
@@ -59,11 +60,11 @@ func TestWriteHandler_BucketAndMappingExistsDefaultRP(t *testing.T) {
 
 	findAutogenMapping := dbrpMappingSvc.
 		EXPECT().
-		FindMany(gomock.Any(), influxdb.DBRPMappingFilterV2{
+		FindMany(gomock.Any(), influxdb.DBRPMappingFilter{
 			OrgID:    &mapping.OrganizationID,
 			Database: &mapping.Database,
 			Default:  &mapping.Default,
-		}).Return([]*influxdb.DBRPMappingV2{mapping}, 1, nil)
+		}).Return([]*influxdb.DBRPMapping{mapping}, 1, nil)
 
 	findBucketByID := bucketService.
 		EXPECT().
@@ -94,7 +95,7 @@ func TestWriteHandler_BucketAndMappingExistsDefaultRP(t *testing.T) {
 	r.URL.RawQuery = params.Encode()
 
 	handler := NewWriterHandler(&PointsWriterBackend{
-		HTTPErrorHandler:   DefaultErrorHandler,
+		HTTPErrorHandler:   kithttp.NewErrorHandler(zaptest.NewLogger(t)),
 		Logger:             zaptest.NewLogger(t),
 		BucketService:      bucketService,
 		DBRPMappingService: dbrp.NewAuthorizedService(dbrpMappingSvc),
@@ -114,7 +115,7 @@ func TestWriteHandler_BucketAndMappingExistsSpecificRP(t *testing.T) {
 	var (
 		// Mocked Services
 		eventRecorder  = mocks.NewMockEventRecorder(ctrl)
-		dbrpMappingSvc = mocks.NewMockDBRPMappingServiceV2(ctrl)
+		dbrpMappingSvc = mocks.NewMockDBRPMappingService(ctrl)
 		bucketService  = mocks.NewMockBucketService(ctrl)
 		pointsWriter   = mocks.NewMockPointsWriter(ctrl)
 
@@ -127,7 +128,7 @@ func TestWriteHandler_BucketAndMappingExistsSpecificRP(t *testing.T) {
 			RetentionPolicyName: "autogen",
 			RetentionPeriod:     72 * time.Hour,
 		}
-		mapping = &influxdb.DBRPMappingV2{
+		mapping = &influxdb.DBRPMapping{
 			OrganizationID:  orgID,
 			BucketID:        bucket.ID,
 			Database:        "mydb",
@@ -140,11 +141,11 @@ func TestWriteHandler_BucketAndMappingExistsSpecificRP(t *testing.T) {
 
 	findAutogenMapping := dbrpMappingSvc.
 		EXPECT().
-		FindMany(gomock.Any(), influxdb.DBRPMappingFilterV2{
+		FindMany(gomock.Any(), influxdb.DBRPMappingFilter{
 			OrgID:           &mapping.OrganizationID,
 			Database:        &mapping.Database,
 			RetentionPolicy: &mapping.RetentionPolicy,
-		}).Return([]*influxdb.DBRPMappingV2{mapping}, 1, nil)
+		}).Return([]*influxdb.DBRPMapping{mapping}, 1, nil)
 
 	findBucketByID := bucketService.
 		EXPECT().
@@ -175,7 +176,7 @@ func TestWriteHandler_BucketAndMappingExistsSpecificRP(t *testing.T) {
 	r.URL.RawQuery = params.Encode()
 
 	handler := NewWriterHandler(&PointsWriterBackend{
-		HTTPErrorHandler:   DefaultErrorHandler,
+		HTTPErrorHandler:   kithttp.NewErrorHandler(zaptest.NewLogger(t)),
 		Logger:             zaptest.NewLogger(t),
 		BucketService:      bucketService,
 		DBRPMappingService: dbrp.NewAuthorizedService(dbrpMappingSvc),
@@ -195,7 +196,7 @@ func TestWriteHandler_PartialWrite(t *testing.T) {
 	var (
 		// Mocked Services
 		eventRecorder  = mocks.NewMockEventRecorder(ctrl)
-		dbrpMappingSvc = mocks.NewMockDBRPMappingServiceV2(ctrl)
+		dbrpMappingSvc = mocks.NewMockDBRPMappingService(ctrl)
 		bucketService  = mocks.NewMockBucketService(ctrl)
 		pointsWriter   = mocks.NewMockPointsWriter(ctrl)
 
@@ -208,7 +209,7 @@ func TestWriteHandler_PartialWrite(t *testing.T) {
 			RetentionPolicyName: "autogen",
 			RetentionPeriod:     72 * time.Hour,
 		}
-		mapping = &influxdb.DBRPMappingV2{
+		mapping = &influxdb.DBRPMapping{
 			OrganizationID:  orgID,
 			BucketID:        bucket.ID,
 			Database:        "mydb",
@@ -221,11 +222,11 @@ func TestWriteHandler_PartialWrite(t *testing.T) {
 
 	findAutogenMapping := dbrpMappingSvc.
 		EXPECT().
-		FindMany(gomock.Any(), influxdb.DBRPMappingFilterV2{
+		FindMany(gomock.Any(), influxdb.DBRPMappingFilter{
 			OrgID:           &mapping.OrganizationID,
 			Database:        &mapping.Database,
 			RetentionPolicy: &mapping.RetentionPolicy,
-		}).Return([]*influxdb.DBRPMappingV2{mapping}, 1, nil)
+		}).Return([]*influxdb.DBRPMapping{mapping}, 1, nil)
 
 	findBucketByID := bucketService.
 		EXPECT().
@@ -257,7 +258,7 @@ func TestWriteHandler_PartialWrite(t *testing.T) {
 	r.URL.RawQuery = params.Encode()
 
 	handler := NewWriterHandler(&PointsWriterBackend{
-		HTTPErrorHandler:   DefaultErrorHandler,
+		HTTPErrorHandler:   kithttp.NewErrorHandler(zaptest.NewLogger(t)),
 		Logger:             zaptest.NewLogger(t),
 		BucketService:      bucketService,
 		DBRPMappingService: dbrp.NewAuthorizedService(dbrpMappingSvc),
@@ -277,7 +278,7 @@ func TestWriteHandler_BucketAndMappingExistsNoPermissions(t *testing.T) {
 	var (
 		// Mocked Services
 		eventRecorder  = mocks.NewMockEventRecorder(ctrl)
-		dbrpMappingSvc = mocks.NewMockDBRPMappingServiceV2(ctrl)
+		dbrpMappingSvc = mocks.NewMockDBRPMappingService(ctrl)
 		bucketService  = mocks.NewMockBucketService(ctrl)
 		pointsWriter   = mocks.NewMockPointsWriter(ctrl)
 
@@ -290,7 +291,7 @@ func TestWriteHandler_BucketAndMappingExistsNoPermissions(t *testing.T) {
 			RetentionPolicyName: "autogen",
 			RetentionPeriod:     72 * time.Hour,
 		}
-		mapping = &influxdb.DBRPMappingV2{
+		mapping = &influxdb.DBRPMapping{
 			OrganizationID:  orgID,
 			BucketID:        bucket.ID,
 			Database:        "mydb",
@@ -303,11 +304,11 @@ func TestWriteHandler_BucketAndMappingExistsNoPermissions(t *testing.T) {
 
 	findAutogenMapping := dbrpMappingSvc.
 		EXPECT().
-		FindMany(gomock.Any(), influxdb.DBRPMappingFilterV2{
+		FindMany(gomock.Any(), influxdb.DBRPMappingFilter{
 			OrgID:    &mapping.OrganizationID,
 			Database: &mapping.Database,
 			Default:  &mapping.Default,
-		}).Return([]*influxdb.DBRPMappingV2{mapping}, 1, nil)
+		}).Return([]*influxdb.DBRPMapping{mapping}, 1, nil)
 
 	findBucketByID := bucketService.
 		EXPECT().
@@ -332,7 +333,7 @@ func TestWriteHandler_BucketAndMappingExistsNoPermissions(t *testing.T) {
 	r.URL.RawQuery = params.Encode()
 
 	handler := NewWriterHandler(&PointsWriterBackend{
-		HTTPErrorHandler:   DefaultErrorHandler,
+		HTTPErrorHandler:   kithttp.NewErrorHandler(zaptest.NewLogger(t)),
 		Logger:             zaptest.NewLogger(t),
 		BucketService:      bucketService,
 		DBRPMappingService: dbrp.NewAuthorizedService(dbrpMappingSvc),
@@ -352,7 +353,7 @@ func TestWriteHandler_MappingNotExists(t *testing.T) {
 	var (
 		// Mocked Services
 		eventRecorder  = mocks.NewMockEventRecorder(ctrl)
-		dbrpMappingSvc = mocks.NewMockDBRPMappingServiceV2(ctrl)
+		dbrpMappingSvc = mocks.NewMockDBRPMappingService(ctrl)
 		bucketService  = mocks.NewMockBucketService(ctrl)
 		pointsWriter   = mocks.NewMockPointsWriter(ctrl)
 
@@ -365,7 +366,7 @@ func TestWriteHandler_MappingNotExists(t *testing.T) {
 			RetentionPolicyName: "autogen",
 			RetentionPeriod:     72 * time.Hour,
 		}
-		mapping = &influxdb.DBRPMappingV2{
+		mapping = &influxdb.DBRPMapping{
 			OrganizationID:  orgID,
 			BucketID:        bucket.ID,
 			Database:        "mydb",
@@ -378,7 +379,7 @@ func TestWriteHandler_MappingNotExists(t *testing.T) {
 
 	findAutogenMapping := dbrpMappingSvc.
 		EXPECT().
-		FindMany(gomock.Any(), influxdb.DBRPMappingFilterV2{
+		FindMany(gomock.Any(), influxdb.DBRPMappingFilter{
 			OrgID:           &mapping.OrganizationID,
 			Database:        &mapping.Database,
 			RetentionPolicy: &badRp,
@@ -402,7 +403,7 @@ func TestWriteHandler_MappingNotExists(t *testing.T) {
 	r.URL.RawQuery = params.Encode()
 
 	handler := NewWriterHandler(&PointsWriterBackend{
-		HTTPErrorHandler:   DefaultErrorHandler,
+		HTTPErrorHandler:   kithttp.NewErrorHandler(zaptest.NewLogger(t)),
 		Logger:             zaptest.NewLogger(t),
 		BucketService:      bucketService,
 		DBRPMappingService: dbrp.NewAuthorizedService(dbrpMappingSvc),
@@ -414,8 +415,6 @@ func TestWriteHandler_MappingNotExists(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Equal(t, `{"code":"not found","message":"unable to find DBRP"}`, w.Body.String())
 }
-
-var DefaultErrorHandler = kithttp.ErrorHandler(0)
 
 func parseLineProtocol(t *testing.T, line string) []models.Point {
 	t.Helper()
@@ -472,7 +471,7 @@ func (m pointsMatcher) String() string {
 	return fmt.Sprintf("%#v", m.points)
 }
 
-func newPermissions(action influxdb.Action, resourceType influxdb.ResourceType, orgID, id *influxdb.ID) []influxdb.Permission {
+func newPermissions(action influxdb.Action, resourceType influxdb.ResourceType, orgID, id *platform.ID) []influxdb.Permission {
 	return []influxdb.Permission{
 		{
 			Action: action,
@@ -485,7 +484,7 @@ func newPermissions(action influxdb.Action, resourceType influxdb.ResourceType, 
 	}
 }
 
-func newAuthorization(orgID influxdb.ID, permissions ...influxdb.Permission) *influxdb.Authorization {
+func newAuthorization(orgID platform.ID, permissions ...influxdb.Permission) *influxdb.Authorization {
 	return &influxdb.Authorization{
 		ID:          generator.ID(),
 		Status:      influxdb.Active,

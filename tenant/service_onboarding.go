@@ -3,8 +3,12 @@ package tenant
 import (
 	"context"
 	"fmt"
+	"strings"
+
 	"github.com/influxdata/influxdb/v2"
 	icontext "github.com/influxdata/influxdb/v2/context"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/kv"
 	"go.uber.org/zap"
 )
@@ -77,20 +81,33 @@ func (s *OnboardService) OnboardInitialUser(ctx context.Context, req *influxdb.O
 		return nil, ErrOnboardingNotAllowed
 	}
 
-	return s.onboardUser(ctx, req, func(influxdb.ID, influxdb.ID) []influxdb.Permission { return influxdb.OperPermissions() })
-}
-
-// OnboardUser allows us to onboard a new user if is onboarding is allowed
-func (s *OnboardService) OnboardUser(ctx context.Context, req *influxdb.OnboardingRequest) (*influxdb.OnboardingResults, error) {
-	return s.onboardUser(ctx, req, func(orgID, userID influxdb.ID) []influxdb.Permission {
-		return append(influxdb.OwnerPermissions(orgID), influxdb.MePermissions(userID)...)
-	})
+	return s.onboardUser(ctx, req, func(platform.ID, platform.ID) []influxdb.Permission { return influxdb.OperPermissions() })
 }
 
 // onboardUser allows us to onboard new users.
-func (s *OnboardService) onboardUser(ctx context.Context, req *influxdb.OnboardingRequest, permFn func(orgID, userID influxdb.ID) []influxdb.Permission) (*influxdb.OnboardingResults, error) {
-	if req == nil || req.User == "" || req.Org == "" || req.Bucket == "" {
-		return nil, ErrOnboardInvalid
+func (s *OnboardService) onboardUser(ctx context.Context, req *influxdb.OnboardingRequest, permFn func(orgID, userID platform.ID) []influxdb.Permission) (*influxdb.OnboardingResults, error) {
+	if req == nil {
+		return nil, &errors.Error{
+			Code: errors.EEmptyValue,
+			Msg:  "onboarding failed: no request body provided",
+		}
+	}
+
+	var missingFields []string
+	if req.User == "" {
+		missingFields = append(missingFields, "username")
+	}
+	if req.Org == "" {
+		missingFields = append(missingFields, "org")
+	}
+	if req.Bucket == "" {
+		missingFields = append(missingFields, "bucket")
+	}
+	if len(missingFields) > 0 {
+		return nil, &errors.Error{
+			Code: errors.EUnprocessableEntity,
+			Msg:  fmt.Sprintf("onboarding failed: missing required fields [%s]", strings.Join(missingFields, ",")),
+		}
 	}
 
 	result := &influxdb.OnboardingResults{}
@@ -135,12 +152,22 @@ func (s *OnboardService) onboardUser(ctx context.Context, req *influxdb.Onboardi
 		return nil, err
 	}
 
+	if err := s.service.CreateUserResourceMapping(ctx, &influxdb.UserResourceMapping{
+		UserID:       user.ID,
+		UserType:     influxdb.Owner,
+		MappingType:  influxdb.UserMappingType,
+		ResourceType: influxdb.InstanceResourceType,
+		ResourceID:   platform.ID(1), // The instance doesn't have a resourceid
+	}); err != nil {
+		return nil, err
+	}
+
 	// create orgs buckets
 	ub := &influxdb.Bucket{
 		OrgID:           org.ID,
 		Name:            req.Bucket,
 		Type:            influxdb.BucketTypeUser,
-		RetentionPeriod: req.RetentionPeriod,
+		RetentionPeriod: req.RetentionPeriod(),
 	}
 
 	if err := s.service.CreateBucket(ctx, ub); err != nil {

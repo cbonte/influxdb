@@ -15,8 +15,9 @@ import (
 	"github.com/influxdata/flux/runtime"
 	"github.com/influxdata/flux/values"
 	"github.com/influxdata/influxdb/v2"
-	"github.com/influxdata/influxdb/v2/query"
 	_ "github.com/influxdata/influxdb/v2/fluxinit/static"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/query"
 )
 
 type fakeQueryService struct {
@@ -31,7 +32,7 @@ type fakeQueryService struct {
 var _ query.AsyncQueryService = (*fakeQueryService)(nil)
 
 func makeAST(q string) lang.ASTCompiler {
-	pkg, err := runtime.ParseToJSON(q)
+	pkg, err := runtime.ParseToJSON(context.Background(), q)
 	if err != nil {
 		panic(err)
 	}
@@ -215,8 +216,7 @@ func newFakeResult() *fakeResult {
 	meta := []flux.ColMeta{{Label: "x", Type: flux.TInt}}
 	vals := []values.Value{values.NewInt(int64(1))}
 	gk := execute.NewGroupKey(meta, vals)
-	a := &memory.Allocator{}
-	b := execute.NewColListTableBuilder(gk, a)
+	b := execute.NewColListTableBuilder(gk, memory.DefaultAllocator)
 	i, _ := b.AddCol(meta[0])
 	b.AppendInt(i, int64(1))
 	t, err := b.Table()
@@ -250,7 +250,7 @@ func (ts tables) Do(f func(flux.Table) error) error {
 func (ts tables) Statistics() flux.Statistics { return flux.Statistics{} }
 
 type testCreds struct {
-	OrgID, UserID influxdb.ID
+	OrgID, UserID platform.ID
 	Auth          *influxdb.Authorization
 }
 

@@ -6,9 +6,11 @@ package mocks
 
 import (
 	context "context"
+	reflect "reflect"
+
 	gomock "github.com/golang/mock/gomock"
 	influxdb "github.com/influxdata/influxdb/v2"
-	reflect "reflect"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 )
 
 // MockAuthFinder is a mock of AuthFinder interface
@@ -35,7 +37,7 @@ func (m *MockAuthFinder) EXPECT() *MockAuthFinderMockRecorder {
 }
 
 // FindAuthorizationByID mocks base method
-func (m *MockAuthFinder) FindAuthorizationByID(arg0 context.Context, arg1 influxdb.ID) (*influxdb.Authorization, error) {
+func (m *MockAuthFinder) FindAuthorizationByID(arg0 context.Context, arg1 platform.ID) (*influxdb.Authorization, error) {
 	m.ctrl.T.Helper()
 	ret := m.ctrl.Call(m, "FindAuthorizationByID", arg0, arg1)
 	ret0, _ := ret[0].(*influxdb.Authorization)

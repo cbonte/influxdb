@@ -6,6 +6,7 @@ import (
 	"net/url"
 
 	"github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 )
 
 var _ influxdb.NotificationEndpoint = &Slack{}
@@ -46,15 +47,15 @@ func (s Slack) Valid() error {
 		return err
 	}
 	if s.URL == "" {
-		return &influxdb.Error{
-			Code: influxdb.EInvalid,
+		return &errors.Error{
+			Code: errors.EInvalid,
 			Msg:  "slack endpoint URL must be provided",
 		}
 	}
 	if s.URL != "" {
 		if _, err := url.Parse(s.URL); err != nil {
-			return &influxdb.Error{
-				Code: influxdb.EInvalid,
+			return &errors.Error{
+				Code: errors.EInvalid,
 				Msg:  fmt.Sprintf("slack endpoint URL is invalid: %s", err.Error()),
 			}
 		}

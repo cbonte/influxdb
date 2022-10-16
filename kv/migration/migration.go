@@ -3,22 +3,17 @@ package migration
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
+	"os"
 	"time"
 
-	influxdb "github.com/influxdata/influxdb/v2"
+	"github.com/influxdata/influxdb/v2/kit/migration"
+	"github.com/influxdata/influxdb/v2/kit/platform"
 	"github.com/influxdata/influxdb/v2/kv"
 	"go.uber.org/zap"
 )
 
-var (
-	migrationBucket = []byte("migrationsv1")
-
-	// ErrMigrationSpecNotFound is returned when a migration specification is missing
-	// for an already applied migration.
-	ErrMigrationSpecNotFound = errors.New("migration specification not found")
-)
+var migrationBucket = []byte("migrationsv1")
 
 type Store = kv.SchemaStore
 
@@ -46,7 +41,7 @@ func (s MigrationState) String() string {
 
 // Migration is a record of a particular migration.
 type Migration struct {
-	ID         influxdb.ID    `json:"id"`
+	ID         platform.ID    `json:"id"`
 	Name       string         `json:"name"`
 	State      MigrationState `json:"-"`
 	StartedAt  *time.Time     `json:"started_at"`
@@ -71,7 +66,8 @@ type Migrator struct {
 
 	Specs []Spec
 
-	now func() time.Time
+	now        func() time.Time
+	backupPath string
 }
 
 // NewMigrator constructs and configures a new Migrator.
@@ -99,9 +95,14 @@ func (m *Migrator) AddMigrations(ms ...Spec) {
 	m.Specs = append(m.Specs, ms...)
 }
 
+// SetBackupPath records the filepath where pre-migration state should be written prior to running migrations.
+func (m *Migrator) SetBackupPath(path string) {
+	m.backupPath = path
+}
+
 // List returns a list of migrations and their states within the provided store.
 func (m *Migrator) List(ctx context.Context) (migrations []Migration, _ error) {
-	if err := m.walk(ctx, m.store, func(id influxdb.ID, m Migration) {
+	if err := m.walk(ctx, m.store, func(id platform.ID, m Migration) {
 		migrations = append(migrations, m)
 	}); err != nil {
 		return nil, err
@@ -110,7 +111,7 @@ func (m *Migrator) List(ctx context.Context) (migrations []Migration, _ error) {
 	migrationsLen := len(migrations)
 	for idx, spec := range m.Specs[migrationsLen:] {
 		migration := Migration{
-			ID:   influxdb.ID(migrationsLen + idx + 1),
+			ID:   platform.ID(migrationsLen + idx + 1),
 			Name: spec.MigrationName(),
 		}
 
@@ -139,7 +140,7 @@ func (m *Migrator) Up(ctx context.Context) error {
 	}
 
 	var lastMigration int
-	if err := m.walk(ctx, m.store, func(id influxdb.ID, mig Migration) {
+	if err := m.walk(ctx, m.store, func(id platform.ID, mig Migration) {
 		// we're interested in the last up migration
 		if mig.State == UpMigrationState {
 			lastMigration = int(id)
@@ -148,10 +149,34 @@ func (m *Migrator) Up(ctx context.Context) error {
 		return wrapErr(err)
 	}
 
+	migrationsToDo := len(m.Specs[lastMigration:])
+	if migrationsToDo == 0 {
+		return nil
+	}
+
+	if m.backupPath != "" && lastMigration != 0 {
+		m.logger.Info("Backing up pre-migration metadata", zap.String("backup_path", m.backupPath))
+		if err := func() error {
+			out, err := os.Create(m.backupPath)
+			if err != nil {
+				return err
+			}
+			defer out.Close()
+
+			if err := m.store.Backup(ctx, out); err != nil {
+				return err
+			}
+			return nil
+		}(); err != nil {
+			return fmt.Errorf("failed to back up pre-migration metadata: %w", err)
+		}
+	}
+
+	m.logger.Info("Bringing up metadata migrations", zap.Int("migration_count", migrationsToDo))
 	for idx, spec := range m.Specs[lastMigration:] {
 		startedAt := m.now()
 		migration := Migration{
-			ID:        influxdb.ID(lastMigration + idx + 1),
+			ID:        platform.ID(lastMigration + idx + 1),
 			Name:      spec.MigrationName(),
 			StartedAt: &startedAt,
 		}
@@ -189,7 +214,7 @@ func (m *Migrator) Up(ctx context.Context) error {
 // 0003 add index "foo on baz" | (down)
 //
 // Down would call down() on 0002 and then on 0001.
-func (m *Migrator) Down(ctx context.Context) (err error) {
+func (m *Migrator) Down(ctx context.Context, untilMigration int) (err error) {
 	wrapErr := func(err error) error {
 		if err == nil {
 			return nil
@@ -203,7 +228,7 @@ func (m *Migrator) Down(ctx context.Context) (err error) {
 		Migration
 	}
 
-	if err := m.walk(ctx, m.store, func(id influxdb.ID, mig Migration) {
+	if err := m.walk(ctx, m.store, func(id platform.ID, mig Migration) {
 		migrations = append(
 			migrations,
 			struct {
@@ -218,7 +243,35 @@ func (m *Migrator) Down(ctx context.Context) (err error) {
 		return wrapErr(err)
 	}
 
-	for i := len(migrations) - 1; i >= 0; i-- {
+	migrationsToDo := len(migrations) - untilMigration
+	if migrationsToDo == 0 {
+		return nil
+	}
+	if migrationsToDo < 0 {
+		m.logger.Warn("KV metadata is already on a schema older than target, nothing to do")
+		return nil
+	}
+
+	if m.backupPath != "" {
+		m.logger.Info("Backing up pre-migration metadata", zap.String("backup_path", m.backupPath))
+		if err := func() error {
+			out, err := os.Create(m.backupPath)
+			if err != nil {
+				return err
+			}
+			defer out.Close()
+
+			if err := m.store.Backup(ctx, out); err != nil {
+				return err
+			}
+			return nil
+		}(); err != nil {
+			return fmt.Errorf("failed to back up pre-migration metadata: %w", err)
+		}
+	}
+
+	m.logger.Info("Tearing down metadata migrations", zap.Int("migration_count", migrationsToDo))
+	for i := len(migrations) - 1; i >= untilMigration; i-- {
 		migration := migrations[i]
 
 		m.logMigrationEvent(DownMigrationState, migration.Migration, "started")
@@ -238,10 +291,15 @@ func (m *Migrator) Down(ctx context.Context) (err error) {
 }
 
 func (m *Migrator) logMigrationEvent(state MigrationState, mig Migration, event string) {
-	m.logger.Info(fmt.Sprintf("Migration %q %s (%s)", mig.Name, event, state))
+	m.logger.Debug(
+		"Executing metadata migration",
+		zap.String("migration_name", mig.Name),
+		zap.String("target_state", state.String()),
+		zap.String("migration_event", event),
+	)
 }
 
-func (m *Migrator) walk(ctx context.Context, store kv.Store, fn func(id influxdb.ID, m Migration)) error {
+func (m *Migrator) walk(ctx context.Context, store kv.Store, fn func(id platform.ID, m Migration)) error {
 	if err := store.View(ctx, func(tx kv.Tx) error {
 		bkt, err := tx.Bucket(migrationBucket)
 		if err != nil {
@@ -254,30 +312,30 @@ func (m *Migrator) walk(ctx context.Context, store kv.Store, fn func(id influxdb
 		}
 
 		return kv.WalkCursor(ctx, cursor, func(k, v []byte) (bool, error) {
-			var id influxdb.ID
+			var id platform.ID
 			if err := id.Decode(k); err != nil {
 				return false, fmt.Errorf("decoding migration id: %w", err)
 			}
 
-			var migration Migration
-			if err := json.Unmarshal(v, &migration); err != nil {
+			var mig Migration
+			if err := json.Unmarshal(v, &mig); err != nil {
 				return false, err
 			}
 
 			idx := int(id) - 1
 			if idx >= len(m.Specs) {
-				return false, fmt.Errorf("migration %q: %w", migration.Name, ErrMigrationSpecNotFound)
+				return false, migration.ErrInvalidMigration(mig.Name)
 			}
 
-			if spec := m.Specs[idx]; spec.MigrationName() != migration.Name {
-				return false, fmt.Errorf("expected migration %q, found %q", spec.MigrationName(), migration.Name)
+			if spec := m.Specs[idx]; spec.MigrationName() != mig.Name {
+				return false, fmt.Errorf("expected migration %q, found %q", spec.MigrationName(), mig.Name)
 			}
 
-			if migration.FinishedAt != nil {
-				migration.State = UpMigrationState
+			if mig.FinishedAt != nil {
+				mig.State = UpMigrationState
 			}
 
-			fn(id, migration)
+			fn(id, mig)
 
 			return true, nil
 		})

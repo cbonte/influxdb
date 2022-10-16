@@ -6,13 +6,13 @@ import (
 	"time"
 
 	"github.com/influxdata/influxdb/v2/inmem"
+	"github.com/influxdata/influxdb/v2/kit/platform"
+	"github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/kv/migration/all"
-	"go.uber.org/zap/zaptest"
-
-	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/pkger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
 )
 
 func TestStoreKV(t *testing.T) {
@@ -23,7 +23,7 @@ func TestStoreKV(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	stackStub := func(id, orgID influxdb.ID) pkger.Stack {
+	stackStub := func(id, orgID platform.ID) pkger.Stack {
 		now := time.Time{}.Add(10 * 365 * 24 * time.Hour)
 		urls := []string{
 			"http://example.com",
@@ -85,13 +85,13 @@ func TestStoreKV(t *testing.T) {
 		})
 
 		t.Run("with ID collisions fails with conflict error", func(t *testing.T) {
-			for _, id := range []influxdb.ID{2, 3} {
+			for _, id := range []platform.ID{2, 3} {
 				err := storeKV.CreateStack(context.Background(), pkger.Stack{
 					ID:    1,
 					OrgID: orgID,
 				})
 				require.Errorf(t, err, "id=%d", id)
-				assert.Equalf(t, influxdb.EConflict, influxdb.ErrorCode(err), "id=%d", id)
+				assert.Equalf(t, errors.EConflict, errors.ErrorCode(err), "id=%d", id)
 			}
 		})
 	})
@@ -136,7 +136,7 @@ func TestStoreKV(t *testing.T) {
 
 		tests := []struct {
 			name     string
-			orgID    influxdb.ID
+			orgID    platform.ID
 			filter   pkger.ListFilter
 			expected []pkger.Stack
 		}{
@@ -164,7 +164,7 @@ func TestStoreKV(t *testing.T) {
 				name:  "by stack ids",
 				orgID: orgID1,
 				filter: pkger.ListFilter{
-					StackIDs: []influxdb.ID{1, 3},
+					StackIDs: []platform.ID{1, 3},
 				},
 				expected: []pkger.Stack{
 					{
@@ -187,7 +187,7 @@ func TestStoreKV(t *testing.T) {
 				name:  "by stack ids skips ids that belong to different organization",
 				orgID: orgID1,
 				filter: pkger.ListFilter{
-					StackIDs: []influxdb.ID{1, 2, 4},
+					StackIDs: []platform.ID{1, 2, 4},
 				},
 				expected: []pkger.Stack{{
 					ID:    1,
@@ -201,7 +201,7 @@ func TestStoreKV(t *testing.T) {
 				name:  "stack ids that do not exist are skipped",
 				orgID: orgID1,
 				filter: pkger.ListFilter{
-					StackIDs: []influxdb.ID{1, 9000},
+					StackIDs: []platform.ID{1, 9000},
 				},
 				expected: []pkger.Stack{{
 					ID:    1,
@@ -229,7 +229,7 @@ func TestStoreKV(t *testing.T) {
 				name:  "by name and id",
 				orgID: orgID1,
 				filter: pkger.ListFilter{
-					StackIDs: []influxdb.ID{3},
+					StackIDs: []platform.ID{3},
 					Names:    []string{"first_name"},
 				},
 				expected: []pkger.Stack{
@@ -276,10 +276,10 @@ func TestStoreKV(t *testing.T) {
 		})
 
 		t.Run("when no match found fails with not found error", func(t *testing.T) {
-			unmatchedID := influxdb.ID(3000)
+			unmatchedID := platform.ID(3000)
 			_, err := storeKV.ReadStackByID(context.Background(), unmatchedID)
 			require.Error(t, err)
-			assert.Equal(t, influxdb.ENotFound, influxdb.ErrorCode(err))
+			assert.Equal(t, errors.ENotFound, errors.ErrorCode(err))
 		})
 	})
 
@@ -314,13 +314,13 @@ func TestStoreKV(t *testing.T) {
 		})
 
 		t.Run("when no match found fails with not found error", func(t *testing.T) {
-			unmatchedID := influxdb.ID(3000)
+			unmatchedID := platform.ID(3000)
 			err := storeKV.UpdateStack(context.Background(), pkger.Stack{
 				ID:    unmatchedID,
 				OrgID: orgID,
 			})
 			require.Error(t, err)
-			assert.Equalf(t, influxdb.ENotFound, influxdb.ErrorCode(err), "err: %s", err)
+			assert.Equalf(t, errors.ENotFound, errors.ErrorCode(err), "err: %s", err)
 		})
 
 		t.Run("when org id does not match fails with unprocessable entity error", func(t *testing.T) {
@@ -329,7 +329,7 @@ func TestStoreKV(t *testing.T) {
 				OrgID: orgID + 9000,
 			})
 			require.Error(t, err)
-			assert.Equalf(t, influxdb.EUnprocessableEntity, influxdb.ErrorCode(err), "err: %s", err)
+			assert.Equalf(t, errors.EUnprocessableEntity, errors.ErrorCode(err), "err: %s", err)
 		})
 	})
 
@@ -349,14 +349,14 @@ func TestStoreKV(t *testing.T) {
 
 			_, err = storeKV.ReadStackByID(context.Background(), expected.ID)
 			require.Error(t, err)
-			errCodeEqual(t, influxdb.ENotFound, err)
+			errCodeEqual(t, errors.ENotFound, err)
 		})
 
 		t.Run("when no match found fails with not found error", func(t *testing.T) {
-			unmatchedID := influxdb.ID(3000)
+			unmatchedID := platform.ID(3000)
 			err := storeKV.DeleteStack(context.Background(), unmatchedID)
 			require.Error(t, err)
-			errCodeEqual(t, influxdb.ENotFound, err)
+			errCodeEqual(t, errors.ENotFound, err)
 		})
 	})
 }
@@ -372,7 +372,7 @@ func readStackEqual(t *testing.T, store pkger.Store, expected pkger.Stack) {
 func errCodeEqual(t *testing.T, expected string, actual error) {
 	t.Helper()
 
-	assert.Equalf(t, expected, influxdb.ErrorCode(actual), "err: %s", actual)
+	assert.Equalf(t, expected, errors.ErrorCode(actual), "err: %s", actual)
 }
 
 func seedEntities(t *testing.T, store pkger.Store, first pkger.Stack, rest ...pkger.Stack) {

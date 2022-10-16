@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"math"
 	"os"
 	"path/filepath"
@@ -38,14 +37,13 @@ type Tombstoner struct {
 
 	FilterFn func(k []byte) bool
 
+	// Tombstones that have been written but not flushed to disk yet.
+	tombstones []Tombstone
 	// cache of the stats for this tombstone
-	fileStats []FileStat
+	tombstoneStats TombstoneStat
 	// indicates that the stats may be out of sync with what is on disk and they
 	// should be refreshed.
 	statsLoaded bool
-
-	// Tombstones that have been written but not flushed to disk yet.
-	tombstones []Tombstone
 
 	// These are references used for pending writes that have not been committed.  If
 	// these are nil, then no pending writes are in progress.
@@ -183,43 +181,52 @@ func (t *Tombstoner) Delete() error {
 
 // HasTombstones return true if there are any tombstone entries recorded.
 func (t *Tombstoner) HasTombstones() bool {
-	files := t.TombstoneFiles()
+	stats := t.TombstoneStats()
+	if !stats.TombstoneExists {
+		return false
+	}
+	if stats.Size > 0 {
+		return true
+	}
+
 	t.mu.RLock()
 	n := len(t.tombstones)
 	t.mu.RUnlock()
 
-	return len(files) > 0 && files[0].Size > 0 || n > 0
+	return n > 0
 }
 
 // TombstoneFiles returns any tombstone files associated with Tombstoner's TSM file.
-func (t *Tombstoner) TombstoneFiles() []FileStat {
+func (t *Tombstoner) TombstoneStats() TombstoneStat {
 	t.mu.RLock()
 	if t.statsLoaded {
-		stats := t.fileStats
+		stats := t.tombstoneStats
 		t.mu.RUnlock()
 		return stats
 	}
 	t.mu.RUnlock()
 
 	stat, err := os.Stat(t.tombstonePath())
-	if os.IsNotExist(err) || err != nil {
+	if err != nil {
 		t.mu.Lock()
 		// The file doesn't exist so record that we tried to load it so
 		// we don't continue to keep trying.  This is the common case.
 		t.statsLoaded = os.IsNotExist(err)
-		t.fileStats = t.fileStats[:0]
+		t.tombstoneStats.TombstoneExists = false
+		stats := t.tombstoneStats
 		t.mu.Unlock()
-		return nil
+		return stats
 	}
 
 	t.mu.Lock()
-	t.fileStats = append(t.fileStats[:0], FileStat{
-		Path:         t.tombstonePath(),
-		LastModified: stat.ModTime().UnixNano(),
-		Size:         uint32(stat.Size()),
-	})
+	t.tombstoneStats = TombstoneStat{
+		TombstoneExists: true,
+		Path:            t.tombstonePath(),
+		LastModified:    stat.ModTime().UnixNano(),
+		Size:            uint32(stat.Size()),
+	}
 	t.statsLoaded = true
-	stats := t.fileStats
+	stats := t.tombstoneStats
 	t.mu.Unlock()
 
 	return stats
@@ -262,7 +269,7 @@ func (t *Tombstoner) Walk(fn func(t Tombstone) error) error {
 }
 
 func (t *Tombstoner) writeTombstoneV3(tombstones []Tombstone) error {
-	tmp, err := ioutil.TempFile(filepath.Dir(t.Path), TombstoneFileExtension)
+	tmp, err := os.CreateTemp(filepath.Dir(t.Path), TombstoneFileExtension)
 	if err != nil {
 		return err
 	}

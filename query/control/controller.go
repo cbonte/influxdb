@@ -20,19 +20,20 @@ package control
 import (
 	"context"
 	"fmt"
+	"math"
 	"runtime/debug"
 	"sync"
 	"sync/atomic"
 
 	"github.com/influxdata/flux"
 	"github.com/influxdata/flux/codes"
+	"github.com/influxdata/flux/dependency"
 	"github.com/influxdata/flux/execute/table"
 	"github.com/influxdata/flux/lang"
 	"github.com/influxdata/flux/memory"
 	"github.com/influxdata/flux/runtime"
-	"github.com/influxdata/influxdb/v2"
 	"github.com/influxdata/influxdb/v2/kit/errors"
-	"github.com/influxdata/influxdb/v2/kit/feature"
+	errors2 "github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/kit/prom"
 	"github.com/influxdata/influxdb/v2/kit/tracing"
 	influxlogger "github.com/influxdata/influxdb/v2/logger"
@@ -48,8 +49,8 @@ const orgLabel = "org"
 // Controller provides a central location to manage all incoming queries.
 // The controller is responsible for compiling, queueing, and executing queries.
 type Controller struct {
-	config     Config
 	lastID     uint64
+	config     Config
 	queriesMu  sync.RWMutex
 	queries    map[QueryID]*Query
 	queryQueue chan *Query
@@ -66,6 +67,8 @@ type Controller struct {
 	log *zap.Logger
 
 	dependencies []flux.Dependency
+
+	fluxLogEnabled bool
 }
 
 type Config struct {
@@ -108,37 +111,60 @@ type Config struct {
 	// this to follow suit.
 	QueueSize int32
 
-	Logger *zap.Logger
 	// MetricLabelKeys is a list of labels to add to the metrics produced by the controller.
 	// The value for a given key will be read off the context.
 	// The context value must be a string or an implementation of the Stringer interface.
 	MetricLabelKeys []string
 
 	ExecutorDependencies []flux.Dependency
+
+	// FluxLogEnabled logs any in-progress queries that get cancelled due to the server being shut down.
+	FluxLogEnabled bool
 }
 
 // complete will fill in the defaults, validate the configuration, and
 // return the new Config.
-func (c *Config) complete() (Config, error) {
+func (c *Config) complete(log *zap.Logger) (Config, error) {
 	config := *c
+	if config.MemoryBytesQuotaPerQuery == 0 {
+		// 0 means unlimited
+		config.MemoryBytesQuotaPerQuery = math.MaxInt64
+	}
 	if config.InitialMemoryBytesQuotaPerQuery == 0 {
 		config.InitialMemoryBytesQuotaPerQuery = config.MemoryBytesQuotaPerQuery
 	}
+	if config.ConcurrencyQuota == 0 && config.QueueSize > 0 {
+		log.Warn("Ignoring query QueueSize > 0 when ConcurrencyQuota is 0")
+		config.QueueSize = 0
+	}
 
-	if err := config.validate(true); err != nil {
+	if err := config.validate(); err != nil {
 		return Config{}, err
 	}
 	return config, nil
 }
 
-func (c *Config) validate(isComplete bool) error {
-	if c.ConcurrencyQuota <= 0 {
-		return errors.New("ConcurrencyQuota must be positive")
+func (c *Config) validate() error {
+	if c.ConcurrencyQuota < 0 {
+		return errors.New("ConcurrencyQuota must not be negative")
+	} else if c.ConcurrencyQuota == 0 {
+		if c.QueueSize != 0 {
+			return errors.New("QueueSize must be unlimited when ConcurrencyQuota is unlimited")
+		}
+		if c.MaxMemoryBytes != 0 {
+			// This is because we have to account for the per-query reserved memory and remove it from
+			// the max total memory. If there is not a maximum number of queries this is not possible.
+			return errors.New("Cannot limit max memory when ConcurrencyQuota is unlimited")
+		}
+	} else {
+		if c.QueueSize <= 0 {
+			return errors.New("QueueSize must be positive when ConcurrencyQuota is limited")
+		}
 	}
-	if c.MemoryBytesQuotaPerQuery <= 0 {
+	if c.MemoryBytesQuotaPerQuery < 0 {
 		return errors.New("MemoryBytesQuotaPerQuery must be positive")
 	}
-	if c.InitialMemoryBytesQuotaPerQuery < 0 || (isComplete && c.InitialMemoryBytesQuotaPerQuery == 0) {
+	if c.InitialMemoryBytesQuotaPerQuery < 0 {
 		return errors.New("InitialMemoryBytesQuotaPerQuery must be positive")
 	}
 	if c.MaxMemoryBytes < 0 {
@@ -149,26 +175,17 @@ func (c *Config) validate(isComplete bool) error {
 			return fmt.Errorf("MaxMemoryBytes must be greater than or equal to the ConcurrencyQuota * InitialMemoryBytesQuotaPerQuery: %d < %d (%d * %d)", c.MaxMemoryBytes, minMemory, c.ConcurrencyQuota, c.InitialMemoryBytesQuotaPerQuery)
 		}
 	}
-	if c.QueueSize <= 0 {
-		return errors.New("QueueSize must be positive")
-	}
 	return nil
-}
-
-// Validate will validate that the controller configuration is valid.
-func (c *Config) Validate() error {
-	return c.validate(false)
 }
 
 type QueryID uint64
 
-func New(config Config) (*Controller, error) {
-	c, err := config.complete()
+func New(config Config, logger *zap.Logger) (*Controller, error) {
+	c, err := config.complete(logger)
 	if err != nil {
 		return nil, errors.Wrap(err, "invalid controller config")
 	}
-	c.MetricLabelKeys = append(c.MetricLabelKeys, orgLabel)
-	logger := c.Logger
+	metricLabelKeys := append(c.MetricLabelKeys, orgLabel)
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -188,25 +205,32 @@ func New(config Config) (*Controller, error) {
 	} else {
 		mm.unlimited = true
 	}
-	ctrl := &Controller{
-		config:       c,
-		queries:      make(map[QueryID]*Query),
-		queryQueue:   make(chan *Query, c.QueueSize),
-		done:         make(chan struct{}),
-		abort:        make(chan struct{}),
-		memory:       mm,
-		log:          logger,
-		metrics:      newControllerMetrics(c.MetricLabelKeys),
-		labelKeys:    c.MetricLabelKeys,
-		dependencies: c.ExecutorDependencies,
+	queryQueue := make(chan *Query, c.QueueSize)
+	if c.ConcurrencyQuota == 0 {
+		queryQueue = nil
 	}
-	quota := int(c.ConcurrencyQuota)
-	ctrl.wg.Add(quota)
-	for i := 0; i < quota; i++ {
-		go func() {
-			defer ctrl.wg.Done()
-			ctrl.processQueryQueue()
-		}()
+	ctrl := &Controller{
+		config:         c,
+		queries:        make(map[QueryID]*Query),
+		queryQueue:     queryQueue,
+		done:           make(chan struct{}),
+		abort:          make(chan struct{}),
+		memory:         mm,
+		log:            logger,
+		metrics:        newControllerMetrics(metricLabelKeys),
+		labelKeys:      metricLabelKeys,
+		dependencies:   c.ExecutorDependencies,
+		fluxLogEnabled: config.FluxLogEnabled,
+	}
+	if c.ConcurrencyQuota != 0 {
+		quota := int(c.ConcurrencyQuota)
+		ctrl.wg.Add(quota)
+		for i := 0; i < quota; i++ {
+			go func() {
+				defer ctrl.wg.Done()
+				ctrl.processQueryQueue()
+			}()
+		}
 	}
 	return ctrl, nil
 }
@@ -221,15 +245,10 @@ func (c *Controller) Query(ctx context.Context, req *query.Request) (flux.Query,
 	// Set the org label value for controller metrics
 	ctx = context.WithValue(ctx, orgLabel, req.OrganizationID.String()) //lint:ignore SA1029 this is a temporary ignore until we have time to create an appropriate type
 	// The controller injects the dependencies for each incoming request.
-	for _, dep := range c.dependencies {
-		ctx = dep.Inject(ctx)
-	}
-	// Add per-transformation spans if the feature flag is set.
-	if feature.QueryTracing().Enabled(ctx) {
-		ctx = flux.WithQueryTracingEnabled(ctx)
-	}
-	q, err := c.query(ctx, req.Compiler)
+	ctx, deps := dependency.Inject(ctx, c.dependencies...)
+	q, err := c.query(ctx, req.Compiler, deps)
 	if err != nil {
+		deps.Finish()
 		return q, err
 	}
 
@@ -238,8 +257,8 @@ func (c *Controller) Query(ctx context.Context, req *query.Request) (flux.Query,
 
 // query submits a query for execution returning immediately.
 // Done must be called on any returned Query objects.
-func (c *Controller) query(ctx context.Context, compiler flux.Compiler) (flux.Query, error) {
-	q, err := c.createQuery(ctx, compiler.CompilerType())
+func (c *Controller) query(ctx context.Context, compiler flux.Compiler, deps *dependency.Span) (flux.Query, error) {
+	q, err := c.createQuery(ctx, compiler, deps)
 	if err != nil {
 		return nil, handleFluxError(err)
 	}
@@ -259,7 +278,7 @@ func (c *Controller) query(ctx context.Context, compiler flux.Compiler) (flux.Qu
 	return q, nil
 }
 
-func (c *Controller) createQuery(ctx context.Context, ct flux.CompilerType) (*Query, error) {
+func (c *Controller) createQuery(ctx context.Context, compiler flux.Compiler, deps *dependency.Span) (*Query, error) {
 	c.queriesMu.RLock()
 	if c.shutdown {
 		c.queriesMu.RUnlock()
@@ -282,7 +301,7 @@ func (c *Controller) createQuery(ctx context.Context, ct flux.CompilerType) (*Qu
 		labelValues[i] = str
 		compileLabelValues[i] = str
 	}
-	compileLabelValues[len(compileLabelValues)-1] = string(ct)
+	compileLabelValues[len(compileLabelValues)-1] = string(compiler.CompilerType())
 
 	cctx, cancel := context.WithCancel(ctx)
 	parentSpan, parentCtx := tracing.StartSpanFromContextWithPromMetrics(
@@ -302,6 +321,8 @@ func (c *Controller) createQuery(ctx context.Context, ct flux.CompilerType) (*Qu
 		parentSpan:         parentSpan,
 		cancel:             cancel,
 		doneCh:             make(chan struct{}),
+		deps:               deps,
+		compiler:           compiler,
 	}
 
 	// Lock the queries mutex for the rest of this method.
@@ -384,12 +405,32 @@ func (c *Controller) enqueueQuery(q *Query) error {
 		}
 	}
 
-	select {
-	case c.queryQueue <- q:
-	default:
-		return &flux.Error{
-			Code: codes.ResourceExhausted,
-			Msg:  "queue length exceeded",
+	if c.queryQueue == nil {
+		// unlimited queries case
+		c.queriesMu.RLock()
+		defer c.queriesMu.RUnlock()
+		if c.shutdown {
+			return &flux.Error{
+				Code: codes.Internal,
+				Msg:  "controller is shutting down, query not runnable",
+			}
+		}
+		// we can't start shutting down until unlock, so it is safe to add to the waitgroup
+		c.wg.Add(1)
+
+		// unlimited queries, so start a goroutine for every query
+		go func() {
+			defer c.wg.Done()
+			c.executeQuery(q)
+		}()
+	} else {
+		select {
+		case c.queryQueue <- q:
+		default:
+			return &flux.Error{
+				Code: codes.ResourceExhausted,
+				Msg:  "queue length exceeded",
+			}
 		}
 	}
 
@@ -486,19 +527,39 @@ func (c *Controller) Queries() []*Query {
 // This will return once the Controller's run loop has been exited and all
 // queries have been finished or until the Context has been canceled.
 func (c *Controller) Shutdown(ctx context.Context) error {
+	// Wait for query processing goroutines to finish.
+	defer c.wg.Wait()
+
 	// Mark that the controller is shutdown so it does not
 	// accept new queries.
-	c.queriesMu.Lock()
-	c.shutdown = true
-	if len(c.queries) == 0 {
-		c.queriesMu.Unlock()
-		return nil
-	}
-	c.queriesMu.Unlock()
+	func() {
+		c.queriesMu.Lock()
+		defer c.queriesMu.Unlock()
+		if !c.shutdown {
+			c.shutdown = true
+			if len(c.queries) == 0 {
+				// We hold the lock. No other queries can be spawned.
+				// No other queries are waiting to be finished, so we have to
+				// close the done channel here instead of in finish(*Query)
+				close(c.done)
+			}
+		}
+	}()
 
 	// Cancel all of the currently active queries.
 	c.queriesMu.RLock()
 	for _, q := range c.queries {
+		if c.fluxLogEnabled {
+			var fluxScript string
+			fc, ok := q.compiler.(lang.FluxCompiler)
+			if !ok {
+				fluxScript = "unknown"
+			} else {
+				fluxScript = fc.Query
+			}
+			c.log.Info("Cancelling Flux query because of server shutdown", zap.String("query", fluxScript))
+		}
+
 		q.Cancel()
 	}
 	c.queriesMu.RUnlock()
@@ -561,12 +622,14 @@ type Query struct {
 	done   sync.Once
 	doneCh chan struct{}
 
-	program flux.Program
-	exec    flux.Query
-	results chan flux.Result
+	program  flux.Program
+	exec     flux.Query
+	results  chan flux.Result
+	compiler flux.Compiler
 
 	memoryManager *queryMemoryManager
-	alloc         *memory.Allocator
+	alloc         *memory.ResourceAllocator
+	deps          *dependency.Span
 }
 
 func (q *Query) ProfilerResults() (flux.ResultIterator, error) {
@@ -651,8 +714,7 @@ func (q *Query) Done() {
 				q.err = q.exec.Err()
 			}
 			// Merge the metadata from the program into the controller stats.
-			stats := q.exec.Statistics()
-			q.stats.Metadata = stats.Metadata
+			q.mergeQueryStats(q.exec.Statistics())
 		}
 
 		// Retrieve the runtime errors that have been accumulated.
@@ -661,6 +723,9 @@ func (q *Query) Done() {
 			errMsgs = append(errMsgs, e.Error())
 		}
 		q.stats.RuntimeErrors = errMsgs
+
+		// Clean up the dependencies.
+		q.deps.Finish()
 
 		// Mark the query as finished so it is removed from the query map.
 		q.c.finish(q)
@@ -681,6 +746,25 @@ func (q *Query) Done() {
 
 	})
 	<-q.doneCh
+}
+
+func (q *Query) mergeQueryStats(other flux.Statistics) {
+	// Clear out the durations and the statistics that we calculate.
+	// We don't want to double count things.
+	other.TotalDuration = 0
+	other.CompileDuration = 0
+	other.QueueDuration = 0
+	other.PlanDuration = 0
+	other.RequeueDuration = 0
+	other.ExecuteDuration = 0
+	other.Concurrency = 0
+	other.MaxAllocated = 0
+	other.TotalAllocated = 0
+	other.RuntimeErrors = nil
+
+	// Now use the Add method to combine the two.
+	// This should pick up any statistics from the other statistics.
+	q.stats = q.stats.Add(other)
 }
 
 // Statistics reports the statistics for the query.
@@ -1028,7 +1112,7 @@ func handleFluxError(err error) error {
 	}
 	werr := handleFluxError(ferr.Err)
 
-	code := influxdb.EInternal
+	code := errors2.EInternal
 	switch ferr.Code {
 	case codes.Inherit:
 		// If we are inheriting the error code, influxdb doesn't
@@ -1036,12 +1120,12 @@ func handleFluxError(err error) error {
 		// the error code from the wrapped error which has already
 		// been translated to an influxdb error (if possible).
 		if werr != nil {
-			code = influxdb.ErrorCode(werr)
+			code = errors2.ErrorCode(werr)
 		}
 	case codes.NotFound:
-		code = influxdb.ENotFound
+		code = errors2.ENotFound
 	case codes.Invalid:
-		code = influxdb.EInvalid
+		code = errors2.EInvalid
 	// These don't really map correctly, but we want
 	// them to show up as 4XX so until influxdb error
 	// codes are updated for more types of failures,
@@ -1052,16 +1136,16 @@ func handleFluxError(err error) error {
 		codes.Aborted,
 		codes.OutOfRange,
 		codes.Unimplemented:
-		code = influxdb.EInvalid
+		code = errors2.EInvalid
 	case codes.PermissionDenied:
-		code = influxdb.EForbidden
+		code = errors2.EForbidden
 	case codes.Unauthenticated:
-		code = influxdb.EUnauthorized
+		code = errors2.EUnauthorized
 	default:
 		// Everything else is treated as an internal error
 		// which is set above.
 	}
-	return &influxdb.Error{
+	return &errors2.Error{
 		Code: code,
 		Msg:  ferr.Msg,
 		Err:  werr,

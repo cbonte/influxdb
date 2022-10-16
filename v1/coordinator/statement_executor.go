@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/influxdata/influxdb/v2/authorizer"
 	iql "github.com/influxdata/influxdb/v2/influxql"
 	"github.com/influxdata/influxdb/v2/influxql/query"
+	errors2 "github.com/influxdata/influxdb/v2/kit/platform/errors"
 	"github.com/influxdata/influxdb/v2/models"
 	"github.com/influxdata/influxdb/v2/pkg/tracing"
 	"github.com/influxdata/influxdb/v2/pkg/tracing/fields"
@@ -33,7 +35,7 @@ type StatementExecutor struct {
 	// ShardMapper for mapping shards when executing a SELECT statement.
 	ShardMapper query.ShardMapper
 
-	DBRP influxdb.DBRPMappingServiceV2
+	DBRP influxdb.DBRPMappingService
 
 	// Select statement limits
 	MaxSelectPointN   int
@@ -317,7 +319,7 @@ func (e *StatementExecutor) createIterators(ctx context.Context, stmt *influxql.
 
 func (e *StatementExecutor) executeShowDatabasesStatement(ctx context.Context, q *influxql.ShowDatabasesStatement, ectx *query.ExecutionContext) (models.Rows, error) {
 	row := &models.Row{Name: "databases", Columns: []string{"name"}}
-	dbrps, _, err := e.DBRP.FindMany(ctx, influxdb.DBRPMappingFilterV2{
+	dbrps, _, err := e.DBRP.FindMany(ctx, influxdb.DBRPMappingFilter{
 		OrgID: &ectx.OrgID,
 	})
 	if err != nil {
@@ -336,7 +338,7 @@ func (e *StatementExecutor) executeShowDatabasesStatement(ctx context.Context, q
 		}
 		err = authorizer.IsAllowed(ctx, *perm)
 		if err != nil {
-			if influxdb.ErrorCode(err) == influxdb.EUnauthorized {
+			if errors2.ErrorCode(err) == errors2.EUnauthorized {
 				continue
 			}
 			return nil, err
@@ -347,9 +349,9 @@ func (e *StatementExecutor) executeShowDatabasesStatement(ctx context.Context, q
 	return []*models.Row{row}, nil
 }
 
-func (e *StatementExecutor) getDefaultRP(ctx context.Context, database string, ectx *query.ExecutionContext) (*influxdb.DBRPMappingV2, error) {
+func (e *StatementExecutor) getDefaultRP(ctx context.Context, database string, ectx *query.ExecutionContext) (*influxdb.DBRPMapping, error) {
 	defaultRP := true
-	mappings, n, err := e.DBRP.FindMany(ctx, influxdb.DBRPMappingFilterV2{
+	mappings, n, err := e.DBRP.FindMany(ctx, influxdb.DBRPMappingFilter{
 		OrgID:    &ectx.OrgID,
 		Database: &database,
 		Default:  &defaultRP,
@@ -370,10 +372,18 @@ func (e *StatementExecutor) executeDeleteSeriesStatement(ctx context.Context, q 
 		return err
 	}
 
+	// Require write for DELETE queries
+	_, _, err = authorizer.AuthorizeWrite(ctx, influxdb.BucketsResourceType, mapping.BucketID, ectx.OrgID)
+	if err != nil {
+		return ectx.Send(ctx, &query.Result{
+			Err: fmt.Errorf("insufficient permissions"),
+		})
+	}
+
 	// Convert "now()" to current time.
 	q.Condition = influxql.Reduce(q.Condition, &influxql.NowValuer{Now: time.Now().UTC()})
 
-	return e.TSDBStore.DeleteSeries(mapping.BucketID.String(), q.Sources, q.Condition)
+	return e.TSDBStore.DeleteSeries(ctx, mapping.BucketID.String(), q.Sources, q.Condition)
 }
 
 func (e *StatementExecutor) executeDropMeasurementStatement(ctx context.Context, q *influxql.DropMeasurementStatement, database string, ectx *query.ExecutionContext) error {
@@ -381,56 +391,137 @@ func (e *StatementExecutor) executeDropMeasurementStatement(ctx context.Context,
 	if err != nil {
 		return err
 	}
-	return e.TSDBStore.DeleteMeasurement(mapping.BucketID.String(), q.Name)
-}
 
-func (e *StatementExecutor) executeShowMeasurementsStatement(ctx context.Context, q *influxql.ShowMeasurementsStatement, ectx *query.ExecutionContext) error {
-	if q.Database == "" {
-		return ErrDatabaseNameRequired
-	}
-
-	mapping, err := e.getDefaultRP(ctx, q.Database, ectx)
+	// Require write for DROP MEASUREMENT queries
+	_, _, err = authorizer.AuthorizeWrite(ctx, influxdb.BucketsResourceType, mapping.BucketID, ectx.OrgID)
 	if err != nil {
-		return err
-	}
-
-	names, err := e.TSDBStore.MeasurementNames(ectx.Authorizer, mapping.BucketID.String(), q.Condition)
-	if err != nil || len(names) == 0 {
 		return ectx.Send(ctx, &query.Result{
-			Err: err,
+			Err: fmt.Errorf("insufficient permissions"),
 		})
 	}
 
-	if q.Offset > 0 {
-		if q.Offset >= len(names) {
-			names = nil
+	return e.TSDBStore.DeleteMeasurement(ctx, mapping.BucketID.String(), q.Name)
+}
+
+type measurementRow struct {
+	name   []byte
+	db, rp string
+}
+
+func (e *StatementExecutor) executeShowMeasurementsStatement(ctx context.Context, q *influxql.ShowMeasurementsStatement, ectx *query.ExecutionContext) error {
+	if q.Database == "" && !q.WildcardDatabase {
+		return ErrDatabaseNameRequired
+	}
+
+	if q.WildcardDatabase {
+		// We could support this but it doesn't seem very useful.
+		if q.RetentionPolicy != "" {
+			return ectx.Send(ctx, &query.Result{
+				Err: fmt.Errorf("query 'SHOW MEASUREMENTS ON *.rp' not supported. use 'ON *.*' or specify a database"),
+			})
+		}
+		// It is not clear how '*' should interact with the default retention policy, so reject it
+		if !q.WildcardRetentionPolicy {
+			return ectx.Send(ctx, &query.Result{
+				Err: fmt.Errorf("query 'SHOW MEASUREMENTS ON *' not supported. use 'ON *.*' or specify a database"),
+			})
+		}
+	}
+
+	onlyPrintMeasurements := !(q.WildcardDatabase || q.WildcardRetentionPolicy || q.RetentionPolicy != "")
+
+	mappingsFilter := influxdb.DBRPMappingFilter{
+		OrgID: &ectx.OrgID,
+	}
+
+	if !q.WildcardDatabase {
+		mappingsFilter.Database = &q.Database
+	}
+	if !q.WildcardRetentionPolicy {
+		if q.RetentionPolicy == "" {
+			defaultRP := true
+			mappingsFilter.Default = &defaultRP
 		} else {
-			names = names[q.Offset:]
+			mappingsFilter.RetentionPolicy = &q.RetentionPolicy
+		}
+	}
+	mappings, _, err := e.DBRP.FindMany(ctx, mappingsFilter)
+	if err != nil {
+		return fmt.Errorf("finding DBRP mappings: %v", err)
+	}
+
+	rows := make([]measurementRow, 0)
+
+	// Sort the sources for consistent output
+	sort.Slice(mappings, func(i, j int) bool {
+		if mappings[i].Database != mappings[j].Database {
+			return mappings[i].Database < mappings[j].Database
+		}
+		return mappings[i].RetentionPolicy < mappings[j].RetentionPolicy
+	})
+
+	for _, mapping := range mappings {
+		names, err := e.TSDBStore.MeasurementNames(ctx, ectx.Authorizer, mapping.BucketID.String(), q.Condition)
+		if err != nil {
+			return ectx.Send(ctx, &query.Result{
+				Err: err,
+			})
+		}
+		for _, name := range names {
+			rows = append(rows, measurementRow{
+				name: name,
+				db:   mapping.Database,
+				rp:   mapping.RetentionPolicy,
+			})
+		}
+	}
+
+	if q.Offset > 0 {
+		if q.Offset >= len(rows) {
+			rows = nil
+		} else {
+			rows = rows[q.Offset:]
 		}
 	}
 
 	if q.Limit > 0 {
-		if q.Limit < len(names) {
-			names = names[:q.Limit]
+		if q.Limit < len(rows) {
+			rows = rows[:q.Limit]
 		}
 	}
 
-	values := make([][]interface{}, len(names))
-	for i, name := range names {
-		values[i] = []interface{}{string(name)}
+	if len(rows) == 0 {
+		return ectx.Send(ctx, &query.Result{})
 	}
 
-	if len(values) == 0 {
-		return ectx.Send(ctx, &query.Result{})
+	if onlyPrintMeasurements {
+		values := make([][]interface{}, len(rows))
+		for i, r := range rows {
+			values[i] = []interface{}{string(r.name)}
+		}
+
+		return ectx.Send(ctx, &query.Result{
+			Series: []*models.Row{{
+				Name:    "measurements",
+				Columns: []string{"name"},
+				Values:  values,
+			}},
+		})
+	}
+
+	values := make([][]interface{}, len(rows))
+	for i, r := range rows {
+		values[i] = []interface{}{string(r.name), r.db, r.rp}
 	}
 
 	return ectx.Send(ctx, &query.Result{
 		Series: []*models.Row{{
 			Name:    "measurements",
-			Columns: []string{"name"},
+			Columns: []string{"name", "database", "retention policy"},
 			Values:  values,
 		}},
 	})
+
 }
 
 func (e *StatementExecutor) executeShowRetentionPoliciesStatement(ctx context.Context, q *influxql.ShowRetentionPoliciesStatement, ectx *query.ExecutionContext) (models.Rows, error) {
@@ -438,7 +529,7 @@ func (e *StatementExecutor) executeShowRetentionPoliciesStatement(ctx context.Co
 		return nil, ErrDatabaseNameRequired
 	}
 
-	dbrps, _, err := e.DBRP.FindMany(ctx, influxdb.DBRPMappingFilterV2{
+	dbrps, _, err := e.DBRP.FindMany(ctx, influxdb.DBRPMappingFilter{
 		OrgID:    &ectx.OrgID,
 		Database: &q.Database,
 	})
@@ -455,7 +546,7 @@ func (e *StatementExecutor) executeShowRetentionPoliciesStatement(ctx context.Co
 		}
 		err = authorizer.IsAllowed(ctx, *perm)
 		if err != nil {
-			if influxdb.ErrorCode(err) == influxdb.EUnauthorized {
+			if errors2.ErrorCode(err) == errors2.EUnauthorized {
 				continue
 			}
 			return nil, err
@@ -508,7 +599,7 @@ func (e *StatementExecutor) executeShowTagKeys(ctx context.Context, q *influxql.
 		}
 	}
 
-	tagKeys, err := e.TSDBStore.TagKeys(ectx.Authorizer, shardIDs, cond)
+	tagKeys, err := e.TSDBStore.TagKeys(ctx, ectx.Authorizer, shardIDs, cond)
 	if err != nil {
 		return ectx.Send(ctx, &query.Result{
 			Err: err,
@@ -600,7 +691,7 @@ func (e *StatementExecutor) executeShowTagValues(ctx context.Context, q *influxq
 		}
 	}
 
-	tagValues, err := e.TSDBStore.TagValues(ectx.Authorizer, shardIDs, cond)
+	tagValues, err := e.TSDBStore.TagValues(ctx, ectx.Authorizer, shardIDs, cond)
 	if err != nil {
 		return ectx.Send(ctx, &query.Result{Err: err})
 	}
@@ -714,7 +805,7 @@ func (e *StatementExecutor) normalizeMeasurement(ctx context.Context, m *influxq
 	}
 
 	// TODO(sgc): Validate database; fetch default RP
-	filter := influxdb.DBRPMappingFilterV2{
+	filter := influxdb.DBRPMappingFilter{
 		OrgID:    &ectx.OrgID,
 		Database: &m.Database,
 	}
@@ -742,7 +833,7 @@ func (e *StatementExecutor) normalizeMeasurement(ctx context.Context, m *influxq
 	return nil
 }
 
-type mappings []*influxdb.DBRPMappingV2
+type mappings []*influxdb.DBRPMapping
 
 func (m mappings) DefaultRetentionPolicy(db string) string {
 	for _, v := range m {
@@ -755,11 +846,11 @@ func (m mappings) DefaultRetentionPolicy(db string) string {
 
 // TSDBStore is an interface for accessing the time series data store.
 type TSDBStore interface {
-	DeleteMeasurement(database, name string) error
-	DeleteSeries(database string, sources []influxql.Source, condition influxql.Expr) error
-	MeasurementNames(auth query.Authorizer, database string, cond influxql.Expr) ([][]byte, error)
-	TagKeys(auth query.Authorizer, shardIDs []uint64, cond influxql.Expr) ([]tsdb.TagKeys, error)
-	TagValues(auth query.Authorizer, shardIDs []uint64, cond influxql.Expr) ([]tsdb.TagValues, error)
+	DeleteMeasurement(ctx context.Context, database, name string) error
+	DeleteSeries(ctx context.Context, database string, sources []influxql.Source, condition influxql.Expr) error
+	MeasurementNames(ctx context.Context, auth query.Authorizer, database string, cond influxql.Expr) ([][]byte, error)
+	TagKeys(ctx context.Context, auth query.Authorizer, shardIDs []uint64, cond influxql.Expr) ([]tsdb.TagKeys, error)
+	TagValues(ctx context.Context, auth query.Authorizer, shardIDs []uint64, cond influxql.Expr) ([]tsdb.TagValues, error)
 }
 
 var _ TSDBStore = LocalTSDBStore{}
